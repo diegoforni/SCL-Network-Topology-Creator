@@ -274,18 +274,7 @@ INDEX_HTML = r"""<!doctype html>
               <input id="defaultHosts" type="number" min="1" max="12" value="3">
             </div>
           </div>
-          <div class="row" style="margin-top: 10px">
-            <div class="span-6">
-              <label for="hackerlabNetwork">Hackerlab network</label>
-              <select id="hackerlabNetwork"></select>
-            </div>
-            <div class="span-6">
-              <p class="muted" style="margin: 28px 0 0">
-                The hackerlab container is attached to this network so you can begin from that segment.
-              </p>
-            </div>
-          </div>
-          <p class="muted">Each network is attached to a central router. Firewall rules decide which network pairs can talk and which networks can reach the outside through the router.</p>
+          <p class="muted">Each topology is a single lab: all networks attach to the same router, and SSH is enabled per host when you need direct access.</p>
           <div class="toolbar">
             <button class="secondary" id="rebuildNetworks">Apply network count</button>
             <button class="secondary" id="balancedPreset">Balanced preset</button>
@@ -315,7 +304,6 @@ INDEX_HTML = r"""<!doctype html>
       const topologyName = document.getElementById('topologyName');
       const networkCount = document.getElementById('networkCount');
       const defaultHosts = document.getElementById('defaultHosts');
-      const hackerlabNetwork = document.getElementById('hackerlabNetwork');
 
       let model = null;
       let saved = [];
@@ -374,7 +362,6 @@ INDEX_HTML = r"""<!doctype html>
           name: topologyName.value || 'Corporate training lab',
           created_at: null,
           updated_at: null,
-          infrastructure: { hackerlab_network_id: nets[0]?.id || '' },
           router: { firewall: { allowed: defaultFirewall(nets) } },
           networks: nets
         };
@@ -383,14 +370,8 @@ INDEX_HTML = r"""<!doctype html>
 
       function render() {
         if (!model) resetModel();
-        model.infrastructure = model.infrastructure || { hackerlab_network_id: model.networks[0]?.id || '' };
-        if (!model.infrastructure.hackerlab_network_id || !model.networks.find((network) => network.id === model.infrastructure.hackerlab_network_id)) {
-          model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
-        }
         topologyName.value = model.name || '';
         networkCount.value = model.networks.length;
-        hackerlabNetwork.innerHTML = model.networks.map((network) => `<option value="${escapeHtml(network.id)}" ${network.id === model.infrastructure.hackerlab_network_id ? 'selected' : ''}>${escapeHtml(network.name)}</option>`).join('');
-        hackerlabNetwork.value = model.infrastructure.hackerlab_network_id || '';
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
         pairsEl.innerHTML = pairTemplate();
         selectedJsonEl.textContent = JSON.stringify(collect(), null, 2);
@@ -521,8 +502,6 @@ INDEX_HTML = r"""<!doctype html>
               };
             });
           });
-        model.infrastructure = model.infrastructure || {};
-        model.infrastructure.hackerlab_network_id = hackerlabNetwork.value || model.networks[0]?.id || '';
         model.router.firewall.allowed = Array.from(document.querySelectorAll('[data-firewall]:checked')).map((el) => el.dataset.firewall);
         selectedJsonEl.textContent = JSON.stringify(model, null, 2);
         return model;
@@ -674,11 +653,6 @@ INDEX_HTML = r"""<!doctype html>
             resetModel(5, 4);
             return;
           }
-          if (event.target.id === 'hackerlabNetwork') {
-            collect();
-            render();
-            return;
-          }
           if (action === 'apply-host-count') {
             collect();
             const i = Number(event.target.dataset.networkIndex);
@@ -827,10 +801,6 @@ def validate_topology(topology):
         pair for pair in allowed
         if isinstance(pair, str) and '->' in pair
     ]
-    infrastructure = topology.setdefault('infrastructure', {})
-    hackerlab_network_id = infrastructure.get('hackerlab_network_id')
-    if not hackerlab_network_id or hackerlab_network_id not in seen_networks:
-        infrastructure['hackerlab_network_id'] = networks[0]['id']
     return topology
 
 
@@ -871,10 +841,6 @@ def host_ip(cidr, host_index):
 
 def shell_quote(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
-
-
-def hackerlab_ip(cidr):
-    return f'{subnet_prefix(cidr)}.2'
 
 
 def host_script(topology, network, host, host_index):
@@ -970,17 +936,8 @@ nft -f /tmp/router-rules.nft || true
 """
 
 
-def hackerlab_script(network):
-    gateway = router_ip(network['cidr'])
-    return f"""set -eu
-ip route replace default via {gateway} || true
-exec /root/.start-container.sh
-"""
-
-
 def generate_compose(topology):
     project_prefix = f"scl-topology-{topology['id']}"
-    hackerlab_network_id = topology.get('infrastructure', {}).get('hackerlab_network_id')
     compose = {
         'services': {
             'router': {
@@ -1020,21 +977,6 @@ def generate_compose(topology):
                     f'scl.topology={topology["id"]}',
                     f'scl.network={network["id"]}',
                     f'scl.host_type={host["type"]}',
-                ],
-            }
-        if network['id'] == hackerlab_network_id:
-            compose['services']['hackerlab'] = {
-                'image': 'scl-hackerlab',
-                'container_name': f'{project_prefix}-hackerlab',
-                'hostname': 'hackerlab',
-                'cap_add': ['NET_ADMIN'],
-                'command': ['sh', '-lc', hackerlab_script(network)],
-                'networks': {network_key: {'ipv4_address': hackerlab_ip(network['cidr'])}},
-                'labels': [
-                    'scl.plugin=network-topology',
-                    f'scl.topology={topology["id"]}',
-                    f'scl.network={network["id"]}',
-                    'scl.host_type=hackerlab',
                 ],
             }
     return compose

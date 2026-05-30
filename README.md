@@ -2,12 +2,11 @@
 
 This repository is the standalone home for the SCL Network Topology Creator plugin.
 
-It provides a local control plane for designing and running generated StratoCyberLab network topologies. Each topology can define routed networks, Ubuntu hosts, host roles, local users, optional generated data, internet access per network, and router firewall rules.
-It also lets you enable SSH per host and attach the `hackerlab` container to a chosen network.
+It provides a local control plane for designing and running generated StratoCyberLab network topologies. Each topology can define routed networks, Ubuntu hosts, host roles, local users, optional generated data, internet access per network, router firewall rules, and SSH access on selected hosts.
 
 ## Files
 
-- `metadata.json` describes the plugin for the SCL dashboard.
+- `metadata.json` describes the plugin for SCL plugin discovery.
 - `docker-compose.yml` starts the plugin control plane.
 - `Dockerfile` builds the control-plane container.
 - `app.py` serves the UI and implements topology storage/start/stop.
@@ -26,14 +25,14 @@ Clone this repository into the `plugins` directory of an existing StratoCyberLab
 ```bash
 cd /path/to/stratocyberlab
 git clone https://github.com/<github-owner>/SCL-Network-Topology-Creator.git plugins/network-topology
-docker compose up -d --build --force-recreate dashboard
+docker compose up -d --build control-plane
 ```
 
-Open `http://127.0.0.1/`, expand `Plugins`, select `Network Topology Builder`, and press `Start`.
+Open the plugin UI from the SCL `Plugins` section, select `Network Topology Builder`, and press `Start`.
 
 Replace `<github-owner>` with the GitHub account or organization where this repository is published.
 
-The hackerlab service uses the `scl-hackerlab` image that is built by StratoCyberLab itself, so the main SCL stack should be available when you start a topology that includes it.
+If you add or remove plugins under `./plugins`, restart the SCL dashboard so it rescans plugin metadata. For ordinary changes inside this repository, restart only the plugin container and refresh the plugin page.
 
 ## LLM Data Generation
 
