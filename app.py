@@ -335,6 +335,17 @@ INDEX_HTML = r"""<!doctype html>
               </div>
             </div>
           </div>
+          <div class="row" style="margin-bottom: 10px">
+            <div class="span-6">
+              <label for="hackerlabNetwork">Hackerlab network</label>
+              <select id="hackerlabNetwork"></select>
+            </div>
+            <div class="span-6">
+              <div class="muted" style="padding-top: 28px">
+                The `scl-hackerlab` container is attached here so you can start from that network and reach its hosts.
+              </div>
+            </div>
+          </div>
           <div class="toolbar">
             <button class="secondary" id="rebuildNetworks">Apply network count</button>
             <button class="secondary" id="balancedPreset">Balanced preset</button>
@@ -367,6 +378,7 @@ INDEX_HTML = r"""<!doctype html>
       const routerSshEnabled = document.getElementById('routerSshEnabled');
       const routerUsername = document.getElementById('routerUsername');
       const routerPassword = document.getElementById('routerPassword');
+      const hackerlabNetwork = document.getElementById('hackerlabNetwork');
 
       let model = null;
       let saved = [];
@@ -431,6 +443,7 @@ INDEX_HTML = r"""<!doctype html>
             password: 'strato',
             firewall: { allowed: defaultFirewall(nets) }
           },
+          infrastructure: { hackerlab_network_id: nets[0]?.id || '' },
           networks: nets
         };
         render();
@@ -444,11 +457,17 @@ INDEX_HTML = r"""<!doctype html>
         model.router.password = model.router.password || 'strato';
         model.router.firewall = model.router.firewall || {};
         model.router.firewall.allowed = model.router.firewall.allowed || [];
+        model.infrastructure = model.infrastructure || {};
+        if (!model.infrastructure.hackerlab_network_id || !model.networks.find((network) => network.id === model.infrastructure.hackerlab_network_id)) {
+          model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
+        }
         topologyName.value = model.name || '';
         networkCount.value = model.networks.length;
         routerSshEnabled.checked = model.router.ssh_enabled;
         routerUsername.value = model.router.username;
         routerPassword.value = model.router.password;
+        hackerlabNetwork.innerHTML = model.networks.map((network) => `<option value="${escapeHtml(network.id)}" ${network.id === model.infrastructure.hackerlab_network_id ? 'selected' : ''}>${escapeHtml(network.name)}</option>`).join('');
+        hackerlabNetwork.value = model.infrastructure.hackerlab_network_id || '';
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
         pairsEl.innerHTML = pairTemplate();
         selectedJsonEl.value = JSON.stringify(collect(), null, 2);
@@ -572,6 +591,8 @@ INDEX_HTML = r"""<!doctype html>
         model.router.ssh_enabled = Boolean(routerSshEnabled.checked);
         model.router.username = routerUsername.value.trim() || 'admin';
         model.router.password = routerPassword.value || 'strato';
+        model.infrastructure = model.infrastructure || {};
+        model.infrastructure.hackerlab_network_id = hackerlabNetwork.value || model.networks[0]?.id || '';
         document.querySelectorAll('[data-network]').forEach((networkEl) => {
           const network = model.networks[Number(networkEl.dataset.network)];
           network.name = valueOf(networkEl, 'network.name') || network.name;
@@ -745,6 +766,11 @@ INDEX_HTML = r"""<!doctype html>
             resetModel(5, 4);
             return;
           }
+          if (event.target.id === 'hackerlabNetwork') {
+            collect();
+            render();
+            return;
+          }
           if (action === 'apply-host-count') {
             collect();
             const i = Number(event.target.dataset.networkIndex);
@@ -771,6 +797,9 @@ INDEX_HTML = r"""<!doctype html>
               return;
             }
             model.networks.splice(Number(event.target.dataset.networkIndex), 1);
+            if (model.infrastructure?.hackerlab_network_id && !model.networks.find((network) => network.id === model.infrastructure.hackerlab_network_id)) {
+              model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
+            }
             const validPairs = new Set(model.networks.flatMap((from) => model.networks.filter((to) => to.id !== from.id).map((to) => `${from.id}->${to.id}`)));
             model.router.firewall.allowed = (model.router.firewall.allowed || []).filter((pair) => validPairs.has(pair));
             render();
@@ -908,6 +937,10 @@ def validate_topology(topology):
     router['ssh_enabled'] = bool(router.get('ssh_enabled'))
     router['username'] = normalize_identifier(router.get('username'), 'admin')
     router['password'] = str(router.get('password') or 'strato')
+    infrastructure = topology.setdefault('infrastructure', {})
+    hackerlab_network_id = infrastructure.get('hackerlab_network_id')
+    if not hackerlab_network_id or hackerlab_network_id not in seen_networks:
+        infrastructure['hackerlab_network_id'] = networks[0]['id']
     return topology
 
 
@@ -959,6 +992,10 @@ def host_ip(cidr, host_index):
     return f'{subnet_prefix(cidr)}.{10 + host_index}'
 
 
+def hackerlab_ip(cidr):
+    return f'{subnet_prefix(cidr)}.2'
+
+
 def shell_quote(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
@@ -1001,6 +1038,14 @@ def router_management_block(router):
     if not router.get('ssh_enabled'):
         return ''
     return ssh_setup_block(router.get('username') or 'admin', router.get('password') or 'strato')
+
+
+def hackerlab_script(network):
+    gateway = router_ip(network['cidr'])
+    return f"""set -eu
+ip route replace default via {gateway} || true
+exec /root/.start-container.sh
+"""
 
 
 def default_data_for_host(topology, network, host):
@@ -1070,6 +1115,7 @@ nft -f /tmp/router-rules.nft || true
 
 def generate_compose(topology):
     project_prefix = f"SCL-topology-{topology['id']}"
+    hackerlab_network_id = topology.get('infrastructure', {}).get('hackerlab_network_id')
     compose = {
         'services': {
             'router': {
@@ -1109,6 +1155,21 @@ def generate_compose(topology):
                     f'scl.topology={topology["id"]}',
                     f'scl.network={network["id"]}',
                     f'scl.host_type={host["type"]}',
+                ],
+            }
+        if network['id'] == hackerlab_network_id:
+            compose['services']['hackerlab'] = {
+                'image': 'scl-hackerlab',
+                'container_name': f'{project_prefix}-hackerlab',
+                'hostname': 'hackerlab',
+                'cap_add': ['NET_ADMIN'],
+                'command': ['sh', '-lc', hackerlab_script(network)],
+                'networks': {network_key: {'ipv4_address': hackerlab_ip(network['cidr'])}},
+                'labels': [
+                    'scl.plugin=network-topology',
+                    f'scl.topology={topology["id"]}',
+                    f'scl.network={network["id"]}',
+                    'scl.host_type=hackerlab',
                 ],
             }
     return compose
