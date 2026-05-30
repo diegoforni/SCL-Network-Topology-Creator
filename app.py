@@ -87,9 +87,10 @@ INDEX_HTML = r"""<!doctype html>
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       main {
-        max-width: 1240px;
+        width: 100%;
+        max-width: none;
         margin: 0 auto;
-        padding: 22px;
+        padding: 18px 20px 22px;
       }
       header {
         display: flex;
@@ -147,14 +148,16 @@ INDEX_HTML = r"""<!doctype html>
       }
       .grid {
         display: grid;
-        grid-template-columns: minmax(0, 1.55fr) minmax(340px, .95fr);
+        grid-template-columns: minmax(0, 1fr) minmax(420px, 0.78fr);
         gap: 18px;
+        align-items: start;
       }
       .panel {
         background: var(--panel);
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 16px;
+        min-width: 0;
       }
       .row {
         display: grid;
@@ -178,6 +181,25 @@ INDEX_HTML = r"""<!doctype html>
       }
       .host {
         background: white;
+      }
+      .network {
+        background: #f8fbff;
+      }
+      .network-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+      .network-body {
+        border-top: 1px dashed #d9e2ee;
+        margin-top: 12px;
+        padding-top: 12px;
+      }
+      .host-list {
+        display: grid;
+        gap: 12px;
       }
       .toolbar {
         display: flex;
@@ -232,12 +254,27 @@ INDEX_HTML = r"""<!doctype html>
       }
       pre {
         overflow: auto;
-        max-height: 320px;
+        min-height: 360px;
+        max-height: 760px;
         background: #111827;
         color: #e5e7eb;
         padding: 12px;
         border-radius: 8px;
         font-size: 12px;
+      }
+      textarea.json {
+        min-height: 360px;
+        max-height: 760px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre;
+      }
+      .router-box {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #f8fbff;
+        padding: 12px;
+        margin-bottom: 12px;
       }
       @media (max-width: 920px) {
         .grid { grid-template-columns: 1fr; }
@@ -260,11 +297,11 @@ INDEX_HTML = r"""<!doctype html>
       <div class="grid">
         <section class="panel">
           <h2>Topology</h2>
-        <div class="row">
-          <div class="span-5">
-            <label for="topologyName">Name</label>
-            <input id="topologyName" value="Corporate training lab">
-          </div>
+          <div class="row">
+            <div class="span-5">
+              <label for="topologyName">Name</label>
+              <input id="topologyName" value="Corporate training lab">
+            </div>
             <div class="span-3">
               <label for="networkCount">Networks</label>
               <input id="networkCount" type="number" min="1" max="8" value="3">
@@ -275,6 +312,29 @@ INDEX_HTML = r"""<!doctype html>
             </div>
           </div>
           <p class="muted">Each topology is a single lab: all networks attach to the same router, and SSH is enabled per host when you need direct access.</p>
+          <div class="router-box">
+            <h3>Router</h3>
+            <div class="row">
+              <div class="span-3">
+                <label class="checkbox-line" style="margin: 0">
+                  <input id="routerSshEnabled" type="checkbox">
+                  <span>Enable SSH on router</span>
+                </label>
+              </div>
+              <div class="span-3">
+                <label for="routerUsername">SSH user</label>
+                <input id="routerUsername" value="admin">
+              </div>
+              <div class="span-3">
+                <label for="routerPassword">SSH password</label>
+                <input id="routerPassword" value="strato">
+              </div>
+              <div class="span-3">
+                <label>&nbsp;</label>
+                <div class="muted">Use these credentials to reach the router from `playground-net`.</div>
+              </div>
+            </div>
+          </div>
           <div class="toolbar">
             <button class="secondary" id="rebuildNetworks">Apply network count</button>
             <button class="secondary" id="balancedPreset">Balanced preset</button>
@@ -290,7 +350,7 @@ INDEX_HTML = r"""<!doctype html>
           <h2>Saved Topologies</h2>
           <div id="savedTopologies"></div>
           <h2>Selected Topology JSON</h2>
-          <pre id="selectedJson">{}</pre>
+          <textarea id="selectedJson" class="json" readonly>{}</textarea>
         </aside>
       </div>
     </main>
@@ -304,6 +364,9 @@ INDEX_HTML = r"""<!doctype html>
       const topologyName = document.getElementById('topologyName');
       const networkCount = document.getElementById('networkCount');
       const defaultHosts = document.getElementById('defaultHosts');
+      const routerSshEnabled = document.getElementById('routerSshEnabled');
+      const routerUsername = document.getElementById('routerUsername');
+      const routerPassword = document.getElementById('routerPassword');
 
       let model = null;
       let saved = [];
@@ -362,7 +425,12 @@ INDEX_HTML = r"""<!doctype html>
           name: topologyName.value || 'Corporate training lab',
           created_at: null,
           updated_at: null,
-          router: { firewall: { allowed: defaultFirewall(nets) } },
+          router: {
+            ssh_enabled: false,
+            username: 'admin',
+            password: 'strato',
+            firewall: { allowed: defaultFirewall(nets) }
+          },
           networks: nets
         };
         render();
@@ -370,16 +438,31 @@ INDEX_HTML = r"""<!doctype html>
 
       function render() {
         if (!model) resetModel();
+        model.router = model.router || {};
+        model.router.ssh_enabled = Boolean(model.router.ssh_enabled);
+        model.router.username = model.router.username || 'admin';
+        model.router.password = model.router.password || 'strato';
+        model.router.firewall = model.router.firewall || {};
+        model.router.firewall.allowed = model.router.firewall.allowed || [];
         topologyName.value = model.name || '';
         networkCount.value = model.networks.length;
+        routerSshEnabled.checked = model.router.ssh_enabled;
+        routerUsername.value = model.router.username;
+        routerPassword.value = model.router.password;
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
         pairsEl.innerHTML = pairTemplate();
-        selectedJsonEl.textContent = JSON.stringify(collect(), null, 2);
+        selectedJsonEl.value = JSON.stringify(collect(), null, 2);
       }
 
       function networkTemplate(network, index) {
         return `
           <div class="network" data-network="${index}">
+            <div class="network-head">
+              <h3>${escapeHtml(network.name || `Network ${index + 1}`)}</h3>
+              <div class="toolbar">
+                <button class="secondary" data-action="delete-network" data-network-index="${index}">Delete network</button>
+              </div>
+            </div>
             <div class="row">
               <div class="span-3">
                 <label>Name</label>
@@ -405,7 +488,11 @@ INDEX_HTML = r"""<!doctype html>
               <button class="secondary" data-action="apply-host-count" data-network-index="${index}">Apply hosts</button>
               <button class="secondary" data-action="add-host" data-network-index="${index}">Add host</button>
             </div>
-            ${network.hosts.map((host, hostIndex) => hostTemplate(host, index, hostIndex)).join('')}
+            <div class="network-body">
+              <div class="host-list">
+                ${network.hosts.map((host, hostIndex) => hostTemplate(host, index, hostIndex)).join('')}
+              </div>
+            </div>
           </div>
         `;
       }
@@ -481,6 +568,10 @@ INDEX_HTML = r"""<!doctype html>
       function collect() {
         if (!model) resetModel();
         model.name = topologyName.value.trim() || 'Untitled topology';
+        model.router = model.router || {};
+        model.router.ssh_enabled = Boolean(routerSshEnabled.checked);
+        model.router.username = routerUsername.value.trim() || 'admin';
+        model.router.password = routerPassword.value || 'strato';
         document.querySelectorAll('[data-network]').forEach((networkEl) => {
           const network = model.networks[Number(networkEl.dataset.network)];
           network.name = valueOf(networkEl, 'network.name') || network.name;
@@ -501,9 +592,10 @@ INDEX_HTML = r"""<!doctype html>
                 data_content: valueOf(hostEl, 'host.data_content')
               };
             });
-          });
+        });
+        model.router.firewall = model.router.firewall || {};
         model.router.firewall.allowed = Array.from(document.querySelectorAll('[data-firewall]:checked')).map((el) => el.dataset.firewall);
-        selectedJsonEl.textContent = JSON.stringify(model, null, 2);
+        selectedJsonEl.value = JSON.stringify(model, null, 2);
         return model;
       }
 
@@ -672,6 +764,17 @@ INDEX_HTML = r"""<!doctype html>
             current.push({ id: `h${i + 1}_${current.length + 1}`, name: `${model.networks[i].name}-${current.length + 1}`, type: 'normal-user', image: 'ubuntu:24.04', ssh_enabled: false, username: 'student', password: 'strato', generate_data: false, data_prompt: '', data_content: '' });
             render();
           }
+          if (action === 'delete-network') {
+            collect();
+            if (model.networks.length <= 1) {
+              setStatus('At least one network is required.');
+              return;
+            }
+            model.networks.splice(Number(event.target.dataset.networkIndex), 1);
+            const validPairs = new Set(model.networks.flatMap((from) => model.networks.filter((to) => to.id !== from.id).map((to) => `${from.id}->${to.id}`)));
+            model.router.firewall.allowed = (model.router.firewall.allowed || []).filter((pair) => validPairs.has(pair));
+            render();
+          }
           if (action === 'remove-host') {
             collect();
             model.networks[Number(event.target.dataset.networkIndex)].hosts.splice(Number(event.target.dataset.hostIndex), 1);
@@ -801,6 +904,10 @@ def validate_topology(topology):
         pair for pair in allowed
         if isinstance(pair, str) and '->' in pair
     ]
+    router = topology.setdefault('router', {})
+    router['ssh_enabled'] = bool(router.get('ssh_enabled'))
+    router['username'] = normalize_identifier(router.get('username'), 'admin')
+    router['password'] = str(router.get('password') or 'strato')
     return topology
 
 
@@ -856,6 +963,14 @@ def shell_quote(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
+def ssh_setup_block(username, password):
+    return f"""mkdir -p /var/run/sshd
+useradd -m -s /bin/bash {shell_quote(username)} 2>/dev/null || true
+echo {shell_quote(username + ':' + password)} | chpasswd || true
+/usr/sbin/sshd || true
+"""
+
+
 def host_script(topology, network, host, host_index):
     role = HOST_TYPES[host['type']]['label']
     ip_addr = host_ip(network['cidr'], host_index)
@@ -864,11 +979,7 @@ def host_script(topology, network, host, host_index):
     service_block = role_service_block(host['type'])
     ssh_block = ''
     if host.get('ssh_enabled'):
-        ssh_block = f"""mkdir -p /var/run/sshd
-useradd -m -s /bin/bash {shell_quote(host['username'])} 2>/dev/null || true
-echo {shell_quote(host['username'] + ':' + host['password'])} | chpasswd || true
-/usr/sbin/sshd || true
-"""
+        ssh_block = ssh_setup_block(host['username'], host['password'])
     return f"""set -eu
 ip route replace default via {gateway} || true
 mkdir -p /srv/scl-data /srv/www /srv/files /srv/db /var/log/scl
@@ -884,6 +995,12 @@ cp /srv/scl-data/README.txt /srv/files/share.txt || true
 {ssh_block}
 tail -f /dev/null
 """
+
+
+def router_management_block(router):
+    if not router.get('ssh_enabled'):
+        return ''
+    return ssh_setup_block(router.get('username') or 'admin', router.get('password') or 'strato')
 
 
 def default_data_for_host(topology, network, host):
@@ -910,6 +1027,7 @@ def role_service_block(host_type):
 
 def router_script(topology):
     networks = topology['networks']
+    router = topology.get('router', {})
     allowed_pairs = set(topology.get('router', {}).get('firewall', {}).get('allowed', []))
     forward_rules = []
     for network in networks:
@@ -945,6 +1063,7 @@ table ip nat {{
 }}
 EOF
 nft -f /tmp/router-rules.nft || true
+{router_management_block(router)}
     tail -f /dev/null
 """
 
