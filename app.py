@@ -260,11 +260,11 @@ INDEX_HTML = r"""<!doctype html>
       <div class="grid">
         <section class="panel">
           <h2>Topology</h2>
-          <div class="row">
-            <div class="span-5">
-              <label for="topologyName">Name</label>
-              <input id="topologyName" value="Corporate training lab">
-            </div>
+        <div class="row">
+          <div class="span-5">
+            <label for="topologyName">Name</label>
+            <input id="topologyName" value="Corporate training lab">
+          </div>
             <div class="span-3">
               <label for="networkCount">Networks</label>
               <input id="networkCount" type="number" min="1" max="8" value="3">
@@ -272,6 +272,17 @@ INDEX_HTML = r"""<!doctype html>
             <div class="span-4">
               <label for="defaultHosts">Default hosts per network</label>
               <input id="defaultHosts" type="number" min="1" max="12" value="3">
+            </div>
+          </div>
+          <div class="row" style="margin-top: 10px">
+            <div class="span-6">
+              <label for="hackerlabNetwork">Hackerlab network</label>
+              <select id="hackerlabNetwork"></select>
+            </div>
+            <div class="span-6">
+              <p class="muted" style="margin: 28px 0 0">
+                The hackerlab container is attached to this network so you can begin from that segment.
+              </p>
             </div>
           </div>
           <p class="muted">Each network is attached to a central router. Firewall rules decide which network pairs can talk and which networks can reach the outside through the router.</p>
@@ -304,6 +315,7 @@ INDEX_HTML = r"""<!doctype html>
       const topologyName = document.getElementById('topologyName');
       const networkCount = document.getElementById('networkCount');
       const defaultHosts = document.getElementById('defaultHosts');
+      const hackerlabNetwork = document.getElementById('hackerlabNetwork');
 
       let model = null;
       let saved = [];
@@ -332,6 +344,7 @@ INDEX_HTML = r"""<!doctype html>
               name: `${names[i] || `net${i + 1}`}-${h + 1}`,
               type: roles[h % roles.length],
               image: 'ubuntu:24.04',
+              ssh_enabled: false,
               username: h === 0 && i === 2 ? 'admin' : 'student',
               password: h === 0 && i === 2 ? 'StratoAdmin!23' : 'strato',
               generate_data: ['web-server', 'file-server', 'db', 'log-server'].includes(roles[h % roles.length]),
@@ -361,6 +374,7 @@ INDEX_HTML = r"""<!doctype html>
           name: topologyName.value || 'Corporate training lab',
           created_at: null,
           updated_at: null,
+          infrastructure: { hackerlab_network_id: nets[0]?.id || '' },
           router: { firewall: { allowed: defaultFirewall(nets) } },
           networks: nets
         };
@@ -369,8 +383,14 @@ INDEX_HTML = r"""<!doctype html>
 
       function render() {
         if (!model) resetModel();
+        model.infrastructure = model.infrastructure || { hackerlab_network_id: model.networks[0]?.id || '' };
+        if (!model.infrastructure.hackerlab_network_id || !model.networks.find((network) => network.id === model.infrastructure.hackerlab_network_id)) {
+          model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
+        }
         topologyName.value = model.name || '';
         networkCount.value = model.networks.length;
+        hackerlabNetwork.innerHTML = model.networks.map((network) => `<option value="${escapeHtml(network.id)}" ${network.id === model.infrastructure.hackerlab_network_id ? 'selected' : ''}>${escapeHtml(network.name)}</option>`).join('');
+        hackerlabNetwork.value = model.infrastructure.hackerlab_network_id || '';
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
         pairsEl.innerHTML = pairTemplate();
         selectedJsonEl.textContent = JSON.stringify(collect(), null, 2);
@@ -422,11 +442,11 @@ INDEX_HTML = r"""<!doctype html>
                 <select data-field="host.type">${roleOptions(host.type)}</select>
               </div>
               <div class="span-2">
-                <label>User</label>
+                <label>SSH user</label>
                 <input data-field="host.username" value="${escapeHtml(host.username || 'student')}">
               </div>
               <div class="span-2">
-                <label>Password</label>
+                <label>SSH password</label>
                 <input data-field="host.password" value="${escapeHtml(host.password || 'strato')}">
               </div>
               <div class="span-2">
@@ -435,6 +455,12 @@ INDEX_HTML = r"""<!doctype html>
                   <input data-field="host.generate_data" type="checkbox" ${host.generate_data ? 'checked' : ''}>
                   <span>Use</span>
                 </div>
+              </div>
+              <div class="span-12">
+                <label class="checkbox-line" style="margin: 0">
+                  <input data-field="host.ssh_enabled" type="checkbox" ${host.ssh_enabled ? 'checked' : ''}>
+                  <span>Enable SSH on this host</span>
+                </label>
               </div>
               <div class="span-8">
                 <label>Data prompt</label>
@@ -482,18 +508,21 @@ INDEX_HTML = r"""<!doctype html>
           network.hosts = network.hosts.map((host, hostIndex) => {
             const hostEl = networkEl.querySelector(`[data-host="${hostIndex}"]`);
             if (!hostEl) return host;
-            return {
-              ...host,
-              name: valueOf(hostEl, 'host.name') || host.name,
-              type: valueOf(hostEl, 'host.type') || host.type,
-              username: valueOf(hostEl, 'host.username') || 'student',
-              password: valueOf(hostEl, 'host.password') || 'strato',
-              generate_data: checkedOf(hostEl, 'host.generate_data'),
-              data_prompt: valueOf(hostEl, 'host.data_prompt'),
-              data_content: valueOf(hostEl, 'host.data_content')
-            };
+              return {
+                ...host,
+                name: valueOf(hostEl, 'host.name') || host.name,
+                type: valueOf(hostEl, 'host.type') || host.type,
+                username: valueOf(hostEl, 'host.username') || 'student',
+                password: valueOf(hostEl, 'host.password') || 'strato',
+                ssh_enabled: checkedOf(hostEl, 'host.ssh_enabled'),
+                generate_data: checkedOf(hostEl, 'host.generate_data'),
+                data_prompt: valueOf(hostEl, 'host.data_prompt'),
+                data_content: valueOf(hostEl, 'host.data_content')
+              };
+            });
           });
-        });
+        model.infrastructure = model.infrastructure || {};
+        model.infrastructure.hackerlab_network_id = hackerlabNetwork.value || model.networks[0]?.id || '';
         model.router.firewall.allowed = Array.from(document.querySelectorAll('[data-firewall]:checked')).map((el) => el.dataset.firewall);
         selectedJsonEl.textContent = JSON.stringify(model, null, 2);
         return model;
@@ -645,6 +674,11 @@ INDEX_HTML = r"""<!doctype html>
             resetModel(5, 4);
             return;
           }
+          if (event.target.id === 'hackerlabNetwork') {
+            collect();
+            render();
+            return;
+          }
           if (action === 'apply-host-count') {
             collect();
             const i = Number(event.target.dataset.networkIndex);
@@ -652,7 +686,7 @@ INDEX_HTML = r"""<!doctype html>
             const count = Math.max(1, Math.min(24, Number(valueOf(networkEl, 'network.hostCount')) || 1));
             const current = model.networks[i].hosts;
             while (current.length < count) {
-              current.push({ id: `h${i + 1}_${current.length + 1}`, name: `${model.networks[i].name}-${current.length + 1}`, type: 'normal-user', image: 'ubuntu:24.04', username: 'student', password: 'strato', generate_data: false, data_prompt: '', data_content: '' });
+              current.push({ id: `h${i + 1}_${current.length + 1}`, name: `${model.networks[i].name}-${current.length + 1}`, type: 'normal-user', image: 'ubuntu:24.04', ssh_enabled: false, username: 'student', password: 'strato', generate_data: false, data_prompt: '', data_content: '' });
             }
             current.length = count;
             render();
@@ -661,7 +695,7 @@ INDEX_HTML = r"""<!doctype html>
             collect();
             const i = Number(event.target.dataset.networkIndex);
             const current = model.networks[i].hosts;
-            current.push({ id: `h${i + 1}_${current.length + 1}`, name: `${model.networks[i].name}-${current.length + 1}`, type: 'normal-user', image: 'ubuntu:24.04', username: 'student', password: 'strato', generate_data: false, data_prompt: '', data_content: '' });
+            current.push({ id: `h${i + 1}_${current.length + 1}`, name: `${model.networks[i].name}-${current.length + 1}`, type: 'normal-user', image: 'ubuntu:24.04', ssh_enabled: false, username: 'student', password: 'strato', generate_data: false, data_prompt: '', data_content: '' });
             render();
           }
           if (action === 'remove-host') {
@@ -793,6 +827,10 @@ def validate_topology(topology):
         pair for pair in allowed
         if isinstance(pair, str) and '->' in pair
     ]
+    infrastructure = topology.setdefault('infrastructure', {})
+    hackerlab_network_id = infrastructure.get('hackerlab_network_id')
+    if not hackerlab_network_id or hackerlab_network_id not in seen_networks:
+        infrastructure['hackerlab_network_id'] = networks[0]['id']
     return topology
 
 
@@ -835,16 +873,25 @@ def shell_quote(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
+def hackerlab_ip(cidr):
+    return f'{subnet_prefix(cidr)}.2'
+
+
 def host_script(topology, network, host, host_index):
     role = HOST_TYPES[host['type']]['label']
     ip_addr = host_ip(network['cidr'], host_index)
     gateway = router_ip(network['cidr'])
     data_content = host.get('data_content') or default_data_for_host(topology, network, host)
     service_block = role_service_block(host['type'])
-    return f"""set -eu
-ip route replace default via {gateway} || true
+    ssh_block = ''
+    if host.get('ssh_enabled'):
+        ssh_block = f"""mkdir -p /var/run/sshd
 useradd -m -s /bin/bash {shell_quote(host['username'])} 2>/dev/null || true
 echo {shell_quote(host['username'] + ':' + host['password'])} | chpasswd || true
+/usr/sbin/sshd || true
+"""
+    return f"""set -eu
+ip route replace default via {gateway} || true
 mkdir -p /srv/scl-data /srv/www /srv/files /srv/db /var/log/scl
 cat > /etc/scl-host.json <<'JSON'
 {json.dumps({'topology': topology['name'], 'network': network['name'], 'host': host['name'], 'role': role, 'ip': ip_addr}, indent=2)}
@@ -855,7 +902,7 @@ DATA
 cp /srv/scl-data/README.txt /srv/www/index.txt || true
 cp /srv/scl-data/README.txt /srv/files/share.txt || true
 {service_block}
-/usr/sbin/sshd || true
+{ssh_block}
 tail -f /dev/null
 """
 
@@ -919,12 +966,21 @@ table ip nat {{
 }}
 EOF
 nft -f /tmp/router-rules.nft || true
-tail -f /dev/null
+    tail -f /dev/null
+"""
+
+
+def hackerlab_script(network):
+    gateway = router_ip(network['cidr'])
+    return f"""set -eu
+ip route replace default via {gateway} || true
+exec /root/.start-container.sh
 """
 
 
 def generate_compose(topology):
     project_prefix = f"scl-topology-{topology['id']}"
+    hackerlab_network_id = topology.get('infrastructure', {}).get('hackerlab_network_id')
     compose = {
         'services': {
             'router': {
@@ -964,6 +1020,21 @@ def generate_compose(topology):
                     f'scl.topology={topology["id"]}',
                     f'scl.network={network["id"]}',
                     f'scl.host_type={host["type"]}',
+                ],
+            }
+        if network['id'] == hackerlab_network_id:
+            compose['services']['hackerlab'] = {
+                'image': 'scl-hackerlab',
+                'container_name': f'{project_prefix}-hackerlab',
+                'hostname': 'hackerlab',
+                'cap_add': ['NET_ADMIN'],
+                'command': ['sh', '-lc', hackerlab_script(network)],
+                'networks': {network_key: {'ipv4_address': hackerlab_ip(network['cidr'])}},
+                'labels': [
+                    'scl.plugin=network-topology',
+                    f'scl.topology={topology["id"]}',
+                    f'scl.network={network["id"]}',
+                    'scl.host_type=hackerlab',
                 ],
             }
     return compose
@@ -1033,10 +1104,12 @@ def run_compose(topology_id, args):
 def start_topology(topology_id):
     ensure_base_image()
     run_compose(topology_id, ['up', '-d'])
+    return {'status': 'started'}
 
 
 def stop_topology(topology_id):
     run_compose(topology_id, ['down'])
+    return {'status': 'stopped'}
 
 
 def is_running(topology_id):
@@ -1151,9 +1224,9 @@ class TopologyHandler(BaseHTTPRequestHandler):
             topology_id = unquote(match.group(1))
             action = match.group(2)
             if action == 'start':
-                job_id = start_job(lambda: {'status': 'started'} if not start_topology(topology_id) else {})
+                job_id = start_job(lambda: start_topology(topology_id))
             else:
-                job_id = start_job(lambda: {'status': 'stopped'} if not stop_topology(topology_id) else {})
+                job_id = start_job(lambda: stop_topology(topology_id))
             self.send_json(202, {'job_id': job_id})
             return
         self.send_json(404, {'error': 'Not found'})
