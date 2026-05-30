@@ -242,10 +242,57 @@ INDEX_HTML = r"""<!doctype html>
       .checkbox-line input {
         width: auto;
       }
-      .pair-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-        gap: 8px;
+      .firewall-graph {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #f8fbff;
+        padding: 10px;
+        overflow: hidden;
+      }
+      .graph-canvas {
+        width: 100%;
+        height: auto;
+        min-height: 420px;
+        display: block;
+      }
+      .graph-edge {
+        fill: none;
+        stroke-width: 2;
+        cursor: pointer;
+        pointer-events: stroke;
+      }
+      .graph-edge.allowed {
+        stroke: #18794e;
+      }
+      .graph-edge.blocked {
+        stroke: #9aa7b8;
+        stroke-dasharray: 7 6;
+      }
+      .graph-node circle {
+        stroke: var(--accent);
+        stroke-width: 2;
+        fill: white;
+      }
+      .graph-node text {
+        font-size: 13px;
+        font-weight: 700;
+        fill: #17202a;
+        text-anchor: middle;
+        pointer-events: none;
+      }
+      .graph-node .subtext {
+        font-size: 11px;
+        font-weight: 500;
+        fill: #5d6978;
+      }
+      .graph-legend {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-bottom: 10px;
+      }
+      .graph-legend .pill {
+        background: white;
       }
       .saved-item h3 {
         display: flex;
@@ -354,7 +401,12 @@ INDEX_HTML = r"""<!doctype html>
           <div id="networks"></div>
           <h2>Firewall</h2>
           <p class="muted">Allowed paths are directional. Return traffic for established connections is automatically allowed.</p>
-          <div id="firewallPairs" class="pair-grid"></div>
+          <div class="graph-legend">
+            <span class="pill ok">Allowed link</span>
+            <span class="pill">Blocked link</span>
+            <span class="pill">Click a link to toggle</span>
+          </div>
+          <div id="firewallGraph" class="firewall-graph"></div>
           <div class="status" id="status"></div>
         </section>
         <aside class="panel">
@@ -368,7 +420,7 @@ INDEX_HTML = r"""<!doctype html>
     <script>
       const HOST_TYPES = __HOST_TYPES__;
       const networksEl = document.getElementById('networks');
-      const pairsEl = document.getElementById('firewallPairs');
+      const firewallGraphEl = document.getElementById('firewallGraph');
       const statusEl = document.getElementById('status');
       const savedEl = document.getElementById('savedTopologies');
       const selectedJsonEl = document.getElementById('selectedJson');
@@ -469,7 +521,7 @@ INDEX_HTML = r"""<!doctype html>
         hackerlabNetwork.innerHTML = model.networks.map((network) => `<option value="${escapeHtml(network.id)}" ${network.id === model.infrastructure.hackerlab_network_id ? 'selected' : ''}>${escapeHtml(network.name)}</option>`).join('');
         hackerlabNetwork.value = model.infrastructure.hackerlab_network_id || '';
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
-        pairsEl.innerHTML = pairTemplate();
+        firewallGraphEl.innerHTML = firewallGraphTemplate();
         selectedJsonEl.value = JSON.stringify(collect(), null, 2);
       }
 
@@ -566,22 +618,75 @@ INDEX_HTML = r"""<!doctype html>
         `;
       }
 
-      function pairTemplate() {
+      function networkGraphLayout(networks, width = 900, height = 420) {
+        const cx = width / 2;
+        const cy = height / 2;
+        const radius = Math.max(120, Math.min(width, height) * 0.33);
+        return networks.map((network, index) => {
+          const angle = (-Math.PI / 2) + (2 * Math.PI * index / Math.max(networks.length, 1));
+          const x = cx + radius * Math.cos(angle);
+          const y = cy + radius * Math.sin(angle);
+          return { ...network, x, y, angle };
+        });
+      }
+
+      function firewallGraphTemplate() {
+        const networks = model.networks || [];
         const allowed = new Set(model.router.firewall.allowed || []);
-        const parts = [];
-        for (const from of model.networks) {
-          for (const to of model.networks) {
-            if (from.id === to.id) continue;
-            const key = `${from.id}->${to.id}`;
-            parts.push(`
-              <label class="checkbox-line">
-                <input type="checkbox" data-firewall="${key}" ${allowed.has(key) ? 'checked' : ''}>
-                <span>${escapeHtml(from.name)} -> ${escapeHtml(to.name)}</span>
-              </label>
+        const nodes = networkGraphLayout(networks);
+        const edgeParts = [];
+        for (const source of nodes) {
+          for (const target of nodes) {
+            if (source.id === target.id) continue;
+            const key = `${source.id}->${target.id}`;
+            const dx = target.x - source.x;
+            const dy = target.y - source.y;
+            const midX = (source.x + target.x) / 2;
+            const midY = (source.y + target.y) / 2;
+            const length = Math.max(Math.hypot(dx, dy), 1);
+            const offset = ((source.id < target.id) ? 1 : -1) * Math.min(60, 14 + (length * 0.1));
+            const perpX = (-dy / length) * offset;
+            const perpY = (dx / length) * offset;
+            const cx = midX + perpX;
+            const cy = midY + perpY;
+            const isAllowed = allowed.has(key);
+            edgeParts.push(`
+              <path
+                class="graph-edge ${isAllowed ? 'allowed' : 'blocked'}"
+                data-action="toggle-firewall"
+                data-firewall="${key}"
+                d="M ${source.x.toFixed(1)} ${source.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${target.x.toFixed(1)} ${target.y.toFixed(1)}"
+                marker-end="url(#fwArrow)"
+                aria-label="${escapeHtml(source.name)} to ${escapeHtml(target.name)}"
+              >
+                <title>${escapeHtml(source.name)} -> ${escapeHtml(target.name)}${isAllowed ? ' allowed' : ' blocked'}</title>
+              </path>
             `);
           }
         }
-        return parts.join('');
+        const nodeParts = nodes.map((node) => {
+          const secondary = `${node.hosts.length} host${node.hosts.length === 1 ? '' : 's'}`;
+          return `
+            <g class="graph-node" transform="translate(${node.x.toFixed(1)} ${node.y.toFixed(1)})">
+              <circle r="28"></circle>
+              <text y="-2">${escapeHtml(node.name)}</text>
+              <text class="subtext" y="14">${escapeHtml(secondary)}</text>
+            </g>
+          `;
+        }).join('');
+        const statusText = networks.length ? `Networks: ${networks.length}` : 'No networks';
+        return `
+          <svg class="graph-canvas" viewBox="0 0 900 420" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Firewall topology graph">
+            <defs>
+              <marker id="fwArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L8,4 L0,8 z" fill="#1167b1"></path>
+              </marker>
+            </defs>
+            <text x="20" y="28" fill="#5d6978" font-size="13">${escapeHtml(statusText)}</text>
+            ${edgeParts.join('')}
+            ${nodeParts}
+          </svg>
+        `;
       }
 
       function collect() {
@@ -615,7 +720,7 @@ INDEX_HTML = r"""<!doctype html>
             });
         });
         model.router.firewall = model.router.firewall || {};
-        model.router.firewall.allowed = Array.from(document.querySelectorAll('[data-firewall]:checked')).map((el) => el.dataset.firewall);
+        model.router.firewall.allowed = model.router.firewall.allowed || [];
         selectedJsonEl.value = JSON.stringify(model, null, 2);
         return model;
       }
@@ -743,6 +848,7 @@ INDEX_HTML = r"""<!doctype html>
       document.addEventListener('click', async (event) => {
         const action = event.target.dataset.action;
         try {
+          const firewallEl = event.target.closest?.('[data-firewall]');
           if (event.target.id === 'saveTopology') return saveTopology();
           if (event.target.id === 'newTopology') {
             selectedId = null;
@@ -813,6 +919,19 @@ INDEX_HTML = r"""<!doctype html>
           if (action === 'load-topology') return loadTopology(event.target.dataset.id);
           if (action === 'start-topology') return startTopology(event.target.dataset.id);
           if (action === 'stop-topology') return stopTopology(event.target.dataset.id);
+          if (action === 'toggle-firewall' || firewallEl) {
+            const target = firewallEl || event.target;
+            collect();
+            const key = target.dataset.firewall;
+            const allowed = new Set(model.router.firewall.allowed || []);
+            if (allowed.has(key)) {
+              allowed.delete(key);
+            } else {
+              allowed.add(key);
+            }
+            model.router.firewall.allowed = Array.from(allowed);
+            render();
+          }
         } catch (error) {
           setStatus(`Error: ${error.message}`);
         }

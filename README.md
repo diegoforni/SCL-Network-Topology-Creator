@@ -4,6 +4,7 @@ This repository is the standalone home for the SCL Network Topology Creator plug
 
 It provides a local control plane for designing and running generated StratoCyberLab network topologies. Each topology can define routed networks, Ubuntu hosts, host roles, local users, optional generated data, internet access per network, router firewall rules, and SSH access on selected hosts.
 It also lets you place the `hackerlab` container onto one selected network so you can start the lab from that segment.
+Firewall rules are edited in a clickable graph instead of a long checkbox list.
 
 ## Files
 
