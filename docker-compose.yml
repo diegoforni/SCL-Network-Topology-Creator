@@ -3,7 +3,7 @@ name: network-topology
 services:
   control-plane:
     build: .
-    container_name: scl-plugin-network-topology-control-plane
+    container_name: SCL-plugin-network-topology-control-plane
     stop_signal: SIGINT
     environment:
       - DASHBOARD_LLM_URL=http://dashboard/api/llm/chat

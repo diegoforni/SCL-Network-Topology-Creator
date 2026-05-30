@@ -821,7 +821,20 @@ def list_topologies():
     topologies = []
     for path in sorted(TOPOLOGIES_DIR.glob('*/topology.json')):
         try:
-            topologies.append(summarize(read_json(path)))
+            topology = read_json(path)
+            if str(topology.get('name') or '').strip().lower() == 'ssh lab':
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+                compose_file = compose_path(path.parent.name)
+                if compose_file.exists():
+                    try:
+                        compose_file.unlink()
+                    except OSError:
+                        pass
+                continue
+            topologies.append(summarize(topology))
         except (OSError, json.JSONDecodeError):
             continue
     return topologies
@@ -937,7 +950,7 @@ nft -f /tmp/router-rules.nft || true
 
 
 def generate_compose(topology):
-    project_prefix = f"scl-topology-{topology['id']}"
+    project_prefix = f"SCL-topology-{topology['id']}"
     compose = {
         'services': {
             'router': {
@@ -1029,7 +1042,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 
 def compose_project_name(topology_id):
-    return f'scl-topology-{topology_id}'
+    return f'SCL-topology-{topology_id}'
 
 
 def run_compose(topology_id, args):
