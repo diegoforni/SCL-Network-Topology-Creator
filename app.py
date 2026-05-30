@@ -323,6 +323,19 @@ INDEX_HTML = r"""<!doctype html>
         padding: 12px;
         margin-bottom: 12px;
       }
+      .router-list {
+        display: grid;
+        gap: 12px;
+      }
+      .router-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px;
+        background: #f7fbff;
+      }
+      .router-card.root {
+        background: #eef6ff;
+      }
       @media (max-width: 920px) {
         .grid { grid-template-columns: 1fr; }
         .span-2, .span-3, .span-4, .span-5, .span-6, .span-8 { grid-column: span 12; }
@@ -393,6 +406,13 @@ INDEX_HTML = r"""<!doctype html>
               </div>
             </div>
           </div>
+          <div class="router-box">
+            <div class="toolbar" style="justify-content: space-between; margin-bottom: 10px">
+              <h3>Routers</h3>
+              <button class="secondary" id="addRouter">Add router</button>
+            </div>
+            <div id="routers" class="router-list"></div>
+          </div>
           <div class="toolbar">
             <button class="secondary" id="rebuildNetworks">Apply network count</button>
             <button class="secondary" id="balancedPreset">Balanced preset</button>
@@ -431,6 +451,7 @@ INDEX_HTML = r"""<!doctype html>
       const routerUsername = document.getElementById('routerUsername');
       const routerPassword = document.getElementById('routerPassword');
       const hackerlabNetwork = document.getElementById('hackerlabNetwork');
+      const routersEl = document.getElementById('routers');
 
       let model = null;
       let saved = [];
@@ -470,6 +491,17 @@ INDEX_HTML = r"""<!doctype html>
         });
       }
 
+      function defaultRouters() {
+        return [{
+          id: 'router1',
+          name: 'core',
+          parent_router_id: '',
+          ssh_enabled: false,
+          username: 'admin',
+          password: 'strato'
+        }];
+      }
+
       function defaultFirewall(networks) {
         const allowed = [];
         for (let i = 0; i < networks.length; i++) {
@@ -484,11 +516,16 @@ INDEX_HTML = r"""<!doctype html>
 
       function resetModel(count = 3, hosts = 3) {
         const nets = defaultNetworks(count, hosts);
+        const routers = defaultRouters();
+        nets.forEach((network) => {
+          network.router_id = routers[0].id;
+        });
         model = {
           id: selectedId,
           name: topologyName.value || 'Corporate training lab',
           created_at: null,
           updated_at: null,
+          routers,
           router: {
             ssh_enabled: false,
             username: 'admin',
@@ -503,6 +540,7 @@ INDEX_HTML = r"""<!doctype html>
 
       function render() {
         if (!model) resetModel();
+        model.routers = normalizeRouters(model.routers || defaultRouters());
         model.router = model.router || {};
         model.router.ssh_enabled = Boolean(model.router.ssh_enabled);
         model.router.username = model.router.username || 'admin';
@@ -513,6 +551,11 @@ INDEX_HTML = r"""<!doctype html>
         if (!model.infrastructure.hackerlab_network_id || !model.networks.find((network) => network.id === model.infrastructure.hackerlab_network_id)) {
           model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
         }
+        model.networks.forEach((network) => {
+          if (!network.router_id || !model.routers.find((router) => router.id === network.router_id)) {
+            network.router_id = model.routers[0]?.id || '';
+          }
+        });
         topologyName.value = model.name || '';
         networkCount.value = model.networks.length;
         routerSshEnabled.checked = model.router.ssh_enabled;
@@ -520,9 +563,103 @@ INDEX_HTML = r"""<!doctype html>
         routerPassword.value = model.router.password;
         hackerlabNetwork.innerHTML = model.networks.map((network) => `<option value="${escapeHtml(network.id)}" ${network.id === model.infrastructure.hackerlab_network_id ? 'selected' : ''}>${escapeHtml(network.name)}</option>`).join('');
         hackerlabNetwork.value = model.infrastructure.hackerlab_network_id || '';
+        routersEl.innerHTML = model.routers.map((router, index) => routerTemplate(router, index)).join('');
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
         firewallGraphEl.innerHTML = firewallGraphTemplate();
         selectedJsonEl.value = JSON.stringify(collect(), null, 2);
+      }
+
+      function normalizeRouters(routers) {
+        const items = (routers || []).map((router, index) => ({
+          id: router.id || `router${index + 1}`,
+          name: router.name || (index === 0 ? 'core' : `router-${index + 1}`),
+          parent_router_id: router.parent_router_id || '',
+          ssh_enabled: Boolean(router.ssh_enabled),
+          username: router.username || 'admin',
+          password: router.password || 'strato'
+        }));
+        if (!items.length) {
+          return defaultRouters();
+        }
+        const validIds = new Set(items.map((router) => router.id));
+        const seen = new Set();
+        items.forEach((router, index) => {
+          if (seen.has(router.id)) {
+            router.id = `router${index + 1}_${Math.random().toString(16).slice(2, 6)}`;
+          }
+          seen.add(router.id);
+        });
+        items.forEach((router, index) => {
+          if (index === 0) {
+            router.parent_router_id = '';
+            return;
+          }
+          if (!router.parent_router_id || router.parent_router_id === router.id || !validIds.has(router.parent_router_id)) {
+            router.parent_router_id = items[0].id;
+          }
+        });
+        return items;
+      }
+
+      function routerTemplate(router, index) {
+        const isRoot = index === 0;
+        const children = model.routers.filter((item) => item.parent_router_id === router.id).length;
+        const attachedNetworks = model.networks.filter((network) => network.router_id === router.id).length;
+        return `
+          <div class="router-card ${isRoot ? 'root' : ''}" data-router="${index}">
+            <div class="network-head">
+              <h3>${escapeHtml(router.name || router.id)}</h3>
+              <div class="toolbar">
+                <button class="secondary" data-action="add-child-router" data-router-index="${index}">Add child router</button>
+                <button class="danger" data-action="delete-router" data-router-index="${index}" ${isRoot ? 'disabled' : ''}>Delete router</button>
+              </div>
+            </div>
+            <div class="row">
+              <div class="span-3">
+                <label>Name</label>
+                <input data-field="router.name" value="${escapeHtml(router.name)}">
+              </div>
+              <div class="span-3">
+                <label>Parent router</label>
+                <select data-field="router.parent_router_id">${routerParentOptions(router.parent_router_id, router.id)}</select>
+              </div>
+              <div class="span-2">
+                <label>SSH user</label>
+                <input data-field="router.username" value="${escapeHtml(router.username || 'admin')}">
+              </div>
+              <div class="span-2">
+                <label>SSH password</label>
+                <input data-field="router.password" value="${escapeHtml(router.password || 'strato')}">
+              </div>
+              <div class="span-2">
+                <label>SSH</label>
+                <label class="checkbox-line" style="margin: 8px 0 0">
+                  <input data-field="router.ssh_enabled" type="checkbox" ${router.ssh_enabled ? 'checked' : ''}>
+                  <span>Enable</span>
+                </label>
+              </div>
+              <div class="span-12">
+                <div class="toolbar">
+                  <span class="pill">${attachedNetworks} attached</span>
+                  <span class="pill">${children} child router${children === 1 ? '' : 's'}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      function routerParentOptions(selected, currentId) {
+        const options = [`<option value="">Root router</option>`];
+        for (const router of model.routers) {
+          if (router.id === currentId) continue;
+          options.push(`<option value="${escapeHtml(router.id)}" ${router.id === selected ? 'selected' : ''}>${escapeHtml(router.name || router.id)}</option>`);
+        }
+        return options.join('');
+      }
+
+      function routerSelectOptions(selected) {
+        return model.routers.map((router) => `<option value="${escapeHtml(router.id)}" ${router.id === selected ? 'selected' : ''}>${escapeHtml(router.name || router.id)}</option>`).join('');
       }
 
       function networkTemplate(network, index) {
@@ -553,6 +690,10 @@ INDEX_HTML = r"""<!doctype html>
                   <input data-field="network.internet" type="checkbox" ${network.internet ? 'checked' : ''}>
                   <span>Allow egress</span>
                 </div>
+              </div>
+              <div class="span-6">
+                <label>Router</label>
+                <select data-field="network.router_id">${routerSelectOptions(network.router_id)}</select>
               </div>
             </div>
             <div class="toolbar" style="margin: 10px 0">
@@ -698,11 +839,22 @@ INDEX_HTML = r"""<!doctype html>
         model.router.password = routerPassword.value || 'strato';
         model.infrastructure = model.infrastructure || {};
         model.infrastructure.hackerlab_network_id = hackerlabNetwork.value || model.networks[0]?.id || '';
+        model.routers = model.routers || defaultRouters();
+        document.querySelectorAll('[data-router]').forEach((routerEl) => {
+          const router = model.routers[Number(routerEl.dataset.router)];
+          if (!router) return;
+          router.name = valueOf(routerEl, 'router.name') || router.name;
+          router.parent_router_id = valueOf(routerEl, 'router.parent_router_id');
+          router.username = valueOf(routerEl, 'router.username') || 'admin';
+          router.password = valueOf(routerEl, 'router.password') || 'strato';
+          router.ssh_enabled = checkedOf(routerEl, 'router.ssh_enabled');
+        });
         document.querySelectorAll('[data-network]').forEach((networkEl) => {
           const network = model.networks[Number(networkEl.dataset.network)];
           network.name = valueOf(networkEl, 'network.name') || network.name;
           network.cidr = valueOf(networkEl, 'network.cidr') || network.cidr;
           network.internet = checkedOf(networkEl, 'network.internet');
+          network.router_id = valueOf(networkEl, 'network.router_id') || model.routers[0]?.id || '';
           network.hosts = network.hosts.map((host, hostIndex) => {
             const hostEl = networkEl.querySelector(`[data-host="${hostIndex}"]`);
             if (!hostEl) return host;
@@ -877,6 +1029,21 @@ INDEX_HTML = r"""<!doctype html>
             render();
             return;
           }
+          if (event.target.id === 'addRouter') {
+            collect();
+            const nextIndex = model.routers.length + 1;
+            const parentId = model.routers[0]?.id || '';
+            model.routers.push({
+              id: `router${nextIndex}`,
+              name: `router-${nextIndex}`,
+              parent_router_id: parentId,
+              ssh_enabled: false,
+              username: 'admin',
+              password: 'strato'
+            });
+            render();
+            return;
+          }
           if (action === 'apply-host-count') {
             collect();
             const i = Number(event.target.dataset.networkIndex);
@@ -908,6 +1075,39 @@ INDEX_HTML = r"""<!doctype html>
             }
             const validPairs = new Set(model.networks.flatMap((from) => model.networks.filter((to) => to.id !== from.id).map((to) => `${from.id}->${to.id}`)));
             model.router.firewall.allowed = (model.router.firewall.allowed || []).filter((pair) => validPairs.has(pair));
+            render();
+          }
+          if (action === 'delete-router') {
+            collect();
+            const index = Number(event.target.dataset.routerIndex);
+            if (index === 0) {
+              setStatus('The root router cannot be removed.');
+              return;
+            }
+            const router = model.routers[index];
+            const replacement = router.parent_router_id || model.routers[0]?.id || '';
+            model.routers = model.routers.filter((item) => item.id !== router.id);
+            model.routers.forEach((item) => {
+              if (item.parent_router_id === router.id) item.parent_router_id = replacement;
+            });
+            model.networks.forEach((network) => {
+              if (network.router_id === router.id) network.router_id = replacement;
+            });
+            render();
+          }
+          if (action === 'add-child-router') {
+            collect();
+            const index = Number(event.target.dataset.routerIndex);
+            const parent = model.routers[index];
+            const nextIndex = model.routers.length + 1;
+            model.routers.push({
+              id: `router${nextIndex}`,
+              name: `router-${nextIndex}`,
+              parent_router_id: parent.id,
+              ssh_enabled: false,
+              username: 'admin',
+              password: 'strato'
+            });
             render();
           }
           if (action === 'remove-host') {
@@ -1056,6 +1256,37 @@ def validate_topology(topology):
     router['ssh_enabled'] = bool(router.get('ssh_enabled'))
     router['username'] = normalize_identifier(router.get('username'), 'admin')
     router['password'] = str(router.get('password') or 'strato')
+    routers = topology.get('routers')
+    if not isinstance(routers, list) or not routers:
+        routers = [{
+            'id': 'router1',
+            'name': 'core',
+            'parent_router_id': '',
+            'ssh_enabled': bool(router.get('ssh_enabled')),
+            'username': router['username'],
+            'password': router['password'],
+        }]
+    seen_router_ids = set()
+    normalized_routers = []
+    for index, router_item in enumerate(routers, start=1):
+        router_item['id'] = normalize_identifier(router_item.get('id'), f'router{index}')
+        router_item['name'] = str(router_item.get('name') or router_item['id']).strip()
+        router_item['parent_router_id'] = normalize_identifier(router_item.get('parent_router_id'), '') if router_item.get('parent_router_id') else ''
+        router_item['ssh_enabled'] = bool(router_item.get('ssh_enabled'))
+        router_item['username'] = normalize_identifier(router_item.get('username'), 'admin')
+        router_item['password'] = str(router_item.get('password') or 'strato')
+        if router_item['id'] in seen_router_ids:
+            router_item['id'] = f"{router_item['id']}-{index}"
+        seen_router_ids.add(router_item['id'])
+        normalized_routers.append(router_item)
+    root_router_id = normalized_routers[0]['id']
+    for router_item in normalized_routers[1:]:
+        if not router_item['parent_router_id'] or router_item['parent_router_id'] == router_item['id'] or router_item['parent_router_id'] not in seen_router_ids:
+            router_item['parent_router_id'] = root_router_id
+    topology['routers'] = normalized_routers
+    router_ids = {item['id'] for item in normalized_routers}
+    for network in networks:
+        network['router_id'] = network.get('router_id') if network.get('router_id') in router_ids else root_router_id
     infrastructure = topology.setdefault('infrastructure', {})
     hackerlab_network_id = infrastructure.get('hackerlab_network_id')
     if not hackerlab_network_id or hackerlab_network_id not in seen_networks:
@@ -1189,25 +1420,74 @@ def role_service_block(host_type):
     return ":"
 
 
-def router_script(topology):
-    networks = topology['networks']
-    router = topology.get('router', {})
+def router_key(router_id):
+    return normalize_identifier(router_id, 'router')
+
+
+def transit_network_key(parent_id, child_id):
+    return f"transit_{router_key(parent_id)}_{router_key(child_id)}"
+
+
+def transit_subnet(index):
+    return f"10.250.{index}.0/30"
+
+
+def build_router_maps(topology):
+    routers = topology.get('routers') or []
+    by_id = {router['id']: router for router in routers}
+    children = {router['id']: [] for router in routers}
+    for router in routers:
+        parent_id = router.get('parent_router_id') or ''
+        if parent_id and parent_id in children:
+            children[parent_id].append(router['id'])
+    networks_by_router = {router['id']: [] for router in routers}
+    for network in topology.get('networks', []):
+        networks_by_router.setdefault(network.get('router_id') or routers[0]['id'], []).append(network)
+    return by_id, children, networks_by_router
+
+
+def router_descendant_networks(router_id, children_map, networks_by_router):
+    nets = list(networks_by_router.get(router_id, []))
+    for child_id in children_map.get(router_id, []):
+        nets.extend(router_descendant_networks(child_id, children_map, networks_by_router))
+    return nets
+
+
+def router_script(topology, router, descendant_networks, child_routes, is_root):
     allowed_pairs = set(topology.get('router', {}).get('firewall', {}).get('allowed', []))
     forward_rules = []
-    for network in networks:
+    for network in topology.get('networks', []):
         if network.get('internet'):
             forward_rules.append(f"ip saddr {network['cidr']} oifname \"$$wan_if\" accept")
-    for source in networks:
-        for dest in networks:
+    for source in topology.get('networks', []):
+        for dest in topology.get('networks', []):
             if source['id'] == dest['id']:
                 continue
             if f"{source['id']}->{dest['id']}" in allowed_pairs:
                 forward_rules.append(f"ip saddr {source['cidr']} ip daddr {dest['cidr']} accept")
     if not forward_rules:
         forward_rules.append('counter drop')
+    route_lines = []
+    if not is_root and router.get('parent_transit_ip'):
+        route_lines.append(f"ip route replace default via {router['parent_transit_ip']} || true")
+    for route in child_routes:
+        route_lines.append(f"ip route replace {route['cidr']} via {route['via']} || true")
+    if not route_lines:
+        route_lines.append(':')
     forward_block = '\n    '.join(forward_rules)
+    route_block = '\n'.join(route_lines)
+    nat_block = """
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "$wan_if" masquerade
+  }
+}
+""" if is_root else ''
     return f"""set -eu
 sysctl -w net.ipv4.ip_forward=1 || true
+{route_block}
+{router_management_block(router)}
 wan_if="$(ip route show default | awk '{{print $5; exit}}')"
 cat > /tmp/router-rules.nft <<EOF
 flush ruleset
@@ -1219,39 +1499,28 @@ table inet filter {{
     {forward_block}
   }}
 }}
-table ip nat {{
-  chain postrouting {{
-    type nat hook postrouting priority srcnat; policy accept;
-    oifname "$$wan_if" masquerade
-  }}
-}}
-EOF
+{nat_block}EOF
 nft -f /tmp/router-rules.nft || true
-{router_management_block(router)}
     tail -f /dev/null
 """
 
 
 def generate_compose(topology):
     project_prefix = f"SCL-topology-{topology['id']}"
-    hackerlab_network_id = topology.get('infrastructure', {}).get('hackerlab_network_id')
+    routers = topology.get('routers') or []
+    if not routers:
+        routers = defaultRouters()
+    router_by_id, children_map, networks_by_router = build_router_maps({**topology, 'routers': routers})
+    root_router_id = routers[0]['id']
+
     compose = {
-        'services': {
-            'router': {
-                'image': BASE_IMAGE,
-                'container_name': f'{project_prefix}-router',
-                'hostname': 'router',
-                'cap_add': ['NET_ADMIN'],
-                'sysctls': {'net.ipv4.ip_forward': '1'},
-                'command': ['sh', '-lc', router_script(topology)],
-                'networks': {'playground-net': {}},
-                'labels': ['scl.plugin=network-topology', f'scl.topology={topology["id"]}'],
-            }
-        },
+        'services': {},
         'networks': {
             'playground-net': {'external': True, 'name': 'playground-net'}
         }
     }
+
+    # User-facing network bridges.
     for index, network in enumerate(topology['networks'], start=1):
         network_key = f'topo_{network["id"]}'
         compose['networks'][network_key] = {
@@ -1259,7 +1528,72 @@ def generate_compose(topology):
             'internal': True,
             'ipam': {'config': [{'subnet': network['cidr']}]},
         }
-        compose['services']['router']['networks'][network_key] = {'ipv4_address': router_ip(network['cidr'])}
+
+    transit_links = []
+    child_routes = {router_id: [] for router_id in router_by_id}
+    parent_ip_map = {}
+    transit_index = 1
+    for parent_id, child_ids in children_map.items():
+        for child_id in child_ids:
+            subnet = transit_subnet(transit_index)
+            parent_ip = f'10.250.{transit_index}.1'
+            child_ip = f'10.250.{transit_index}.2'
+            key = transit_network_key(parent_id, child_id)
+            transit_links.append({
+                'key': key,
+                'parent_id': parent_id,
+                'child_id': child_id,
+                'subnet': subnet,
+                'parent_ip': parent_ip,
+                'child_ip': child_ip,
+            })
+            parent_ip_map[child_id] = parent_ip
+            for network in router_descendant_networks(child_id, children_map, networks_by_router):
+                child_routes[parent_id].append({'cidr': network['cidr'], 'via': child_ip})
+            transit_index += 1
+
+    for router in routers:
+        router_id = router['id']
+        service_name = f'router-{router_key(router_id)}'
+        router_networks = {'playground-net': {}} if router_id == root_router_id else {}
+        for network in networks_by_router.get(router_id, []):
+            network_key = f'topo_{network["id"]}'
+            router_networks[network_key] = {'ipv4_address': router_ip(network['cidr'])}
+        for link in transit_links:
+            if link['parent_id'] == router_id:
+                compose['networks'][link['key']] = {
+                    'name': f'{project_prefix}-{link["key"]}',
+                    'internal': True,
+                    'ipam': {'config': [{'subnet': link['subnet']}]},
+                }
+                router_networks[link['key']] = {'ipv4_address': link['parent_ip']}
+            if link['child_id'] == router_id:
+                router_networks[link['key']] = {'ipv4_address': link['child_ip']}
+        descendant_networks = router_descendant_networks(router_id, children_map, networks_by_router)
+        router_script_text = router_script(
+            topology,
+            {**router, 'parent_transit_ip': parent_ip_map.get(router_id, '')},
+            descendant_networks,
+            child_routes.get(router_id, []),
+            router_id == root_router_id,
+        )
+        compose['services'][service_name] = {
+            'image': BASE_IMAGE,
+            'container_name': f'{project_prefix}-{service_name}',
+            'hostname': router.get('name') or router_id,
+            'cap_add': ['NET_ADMIN'],
+            'sysctls': {'net.ipv4.ip_forward': '1'},
+            'command': ['sh', '-lc', router_script_text],
+            'networks': router_networks,
+            'labels': [
+                'scl.plugin=network-topology',
+                f'scl.topology={topology["id"]}',
+                f'scl.router={router_id}',
+            ],
+        }
+
+    for index, network in enumerate(topology['networks'], start=1):
+        network_key = f'topo_{network["id"]}'
         for host_index, host in enumerate(network['hosts'], start=1):
             service_name = f'{network["id"]}-{host["id"]}'
             compose['services'][service_name] = {
@@ -1276,7 +1610,7 @@ def generate_compose(topology):
                     f'scl.host_type={host["type"]}',
                 ],
             }
-        if network['id'] == hackerlab_network_id:
+        if network['id'] == topology.get('infrastructure', {}).get('hackerlab_network_id'):
             compose['services']['hackerlab'] = {
                 'image': 'scl-hackerlab',
                 'container_name': f'{project_prefix}-hackerlab',

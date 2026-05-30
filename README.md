@@ -2,8 +2,9 @@
 
 This repository is the standalone home for the SCL Network Topology Creator plugin.
 
-It provides a local control plane for designing and running generated StratoCyberLab network topologies. Each topology can define routed networks, Ubuntu hosts, host roles, local users, optional generated data, internet access per network, router firewall rules, and SSH access on selected hosts.
+It provides a local control plane for designing and running generated StratoCyberLab network topologies. Each topology can define routed networks, router hierarchies, Ubuntu hosts, host roles, local users, optional generated data, internet access per network, router firewall rules, and SSH access on selected hosts.
 It also lets you place the `hackerlab` container onto one selected network so you can start the lab from that segment.
+Routers can be chained in a parent-child tree, and each network can be assigned to the router that should own it.
 Firewall rules are edited in a clickable graph instead of a long checkbox list.
 
 ## Files
@@ -15,7 +16,7 @@ Firewall rules are edited in a clickable graph instead of a long checkbox list.
 
 ## Runtime Model
 
-Generated networks use a central router container connected to all topology networks and to `playground-net`. Network segments are configured as Docker bridge networks with deterministic `10.77.<n>.0/24` subnets. Hosts are Ubuntu containers with role labels and startup scripts.
+Generated topologies use one or more router containers. Root routers connect to `playground-net`, child routers connect to their parent through transit networks, and assigned networks hang off the router you choose. Network segments are configured as Docker bridge networks with deterministic `10.77.<n>.0/24` subnets. Hosts are Ubuntu containers with role labels and startup scripts.
 
 The first version intentionally starts with Ubuntu-only hosts. Service roles prepare directories, users, and role-specific files; lightweight package-backed services are attempted when a segment has internet access.
 If SSH is enabled for a host, the generated container creates the specified SSH user and starts `sshd`.
