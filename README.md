@@ -1,8 +1,8 @@
 # Network Topology Builder Plugin
 
-This plugin provides a local control plane for designing and running generated StratoCyberLab network topologies.
+This repository is the standalone home for the SCL Network Topology Creator plugin.
 
-It stores topology definitions in a persistent Docker volume and generates one Docker Compose project per topology. Each topology can define routed networks, Ubuntu hosts, host roles, local users, optional generated data, internet access per network, and router firewall rules.
+It provides a local control plane for designing and running generated StratoCyberLab network topologies. Each topology can define routed networks, Ubuntu hosts, host roles, local users, optional generated data, internet access per network, and router firewall rules.
 
 ## Files
 
