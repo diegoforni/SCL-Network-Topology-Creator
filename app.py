@@ -309,6 +309,7 @@ INDEX_HTML = r"""<!doctype html>
         paint-order: stroke;
         stroke: rgba(248, 251, 255, 0.95);
         stroke-width: 4px;
+        pointer-events: none;
       }
       .graph-edge-label.allowed {
         fill: #18794e;
@@ -376,6 +377,12 @@ INDEX_HTML = r"""<!doctype html>
         stroke: var(--accent);
         stroke-width: 2;
         fill: white;
+      }
+      .graph-node {
+        cursor: grab;
+      }
+      .graph-node:active {
+        cursor: grabbing;
       }
       .graph-node.router-node rect {
         stroke: #475569;
@@ -572,6 +579,7 @@ INDEX_HTML = r"""<!doctype html>
       let selectedId = null;
       let busyTopologyId = '';
       let busyTopologyAction = '';
+      let dragState = null;
 
       function roleOptions(selected) {
         return Object.entries(HOST_TYPES).map(([value, info]) => {
@@ -650,7 +658,8 @@ INDEX_HTML = r"""<!doctype html>
             firewall: { allowed: defaultFirewall(nets) }
           },
           infrastructure: { hackerlab_network_id: nets[0]?.id || '' },
-          networks: nets
+          networks: nets,
+          visual: { routers: {}, networks: {} }
         };
         render();
       }
@@ -658,6 +667,7 @@ INDEX_HTML = r"""<!doctype html>
       function render() {
         if (!model) resetModel();
         model.routers = normalizeRouters(model.routers || defaultRouters());
+        model.visual = normalizeVisual(model.visual);
         model.router = model.router || {};
         model.router.ssh_enabled = Boolean(model.router.ssh_enabled);
         model.router.username = model.router.username || 'admin';
@@ -685,6 +695,13 @@ INDEX_HTML = r"""<!doctype html>
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
         firewallGraphEl.innerHTML = firewallGraphTemplate();
         selectedJsonEl.value = JSON.stringify(collect(), null, 2);
+      }
+
+      function normalizeVisual(visual) {
+        const safe = visual && typeof visual === 'object' ? visual : {};
+        const routers = safe.routers && typeof safe.routers === 'object' ? safe.routers : {};
+        const networks = safe.networks && typeof safe.networks === 'object' ? safe.networks : {};
+        return { routers, networks };
       }
 
       function normalizeNetworkRouters(network) {
@@ -943,61 +960,34 @@ INDEX_HTML = r"""<!doctype html>
         return depthMap;
       }
 
-      function topologyGraphLayout(routers, networks, width = 900, height = 560) {
+      function topologyGraphLayout(routers, networks, visual = null, width = 900, height = 560) {
         const routerPositions = {};
+        const networkPositions = {};
         const routerY = 115;
+        const networkY = 385;
         const routerSpan = width - 120;
+        const networkSpan = width - 120;
         const orderedRouters = routers.slice();
         orderedRouters.forEach((router, index) => {
-          const x = orderedRouters.length === 1 ? width / 2 : 60 + (routerSpan * index / (orderedRouters.length - 1));
-          routerPositions[router.id] = { ...router, x, y: routerY, order: index };
-        });
-
-        const networkPositions = {};
-        const groupMap = new Map();
-        networks.forEach((network) => {
-          const attached = Array.from(new Set(network.router_ids || [network.default_router_id || routers[0]?.id || ''])).filter(Boolean);
-          const signature = attached.slice().sort().join('|') || 'unattached';
-          if (!groupMap.has(signature)) {
-            const anchors = attached.map((routerId) => routerPositions[routerId]).filter(Boolean);
-            const fallbackRouter = routerPositions[network.default_router_id || attached[0] || routers[0]?.id || ''];
-            const anchorX = anchors.length ? anchors.reduce((sum, item) => sum + item.x, 0) / anchors.length : (fallbackRouter?.x || width / 2);
-            groupMap.set(signature, {
-              attached,
-              anchorX: Math.max(80, Math.min(width - 80, anchorX)),
-              networks: []
-            });
-          }
-          groupMap.get(signature).networks.push(network);
-        });
-
-        const groups = Array.from(groupMap.values()).sort((a, b) => a.anchorX - b.anchorX);
-        const networkBaseY = 360;
-        const rowGap = 96;
-        groups.forEach((group, rowIndex) => {
-          const rowY = networkBaseY + rowIndex * rowGap;
-          const count = group.networks.length;
-          const spread = Math.min(220, Math.max(120, (count - 1) * 120));
-          group.networks.forEach((network, index) => {
-            const x = count === 1 ? group.anchorX : group.anchorX + ((index - (count - 1) / 2) * (spread / Math.max(count - 1, 1)));
-            networkPositions[network.id] = {
-              ...network,
-              x: Math.max(80, Math.min(width - 80, x)),
-              y: rowY
-            };
-          });
+          const saved = visual?.routers?.[router.id];
+          const x = clamp(saved?.x ?? (orderedRouters.length === 1 ? width / 2 : 60 + (routerSpan * index / (orderedRouters.length - 1))), 60, width - 60);
+          const y = clamp(saved?.y ?? routerY, 70, 220);
+          routerPositions[router.id] = { ...router, x, y, order: index };
         });
 
         networks.forEach((network, index) => {
-          if (networkPositions[network.id]) return;
-          networkPositions[network.id] = {
-            ...network,
-            x: 100 + ((index * 180) % Math.max(width - 200, 1)),
-            y: networkBaseY + Math.floor(index / 4) * rowGap
-          };
+          const saved = visual?.networks?.[network.id];
+          const x = clamp(saved?.x ?? (networks.length === 1 ? width / 2 : 60 + (networkSpan * index / (networks.length - 1))), 60, width - 60);
+          const y = clamp(saved?.y ?? networkY, 300, height - 60);
+          networkPositions[network.id] = { ...network, x, y };
         });
 
-        const canvasHeight = Math.max(height, networkBaseY + Math.max(groups.length, 1) * rowGap + 80);
+        const maxY = Math.max(
+          ...Object.values(routerPositions).map((item) => item.y || 0),
+          ...Object.values(networkPositions).map((item) => item.y || 0),
+          height
+        );
+        const canvasHeight = Math.max(height, maxY + 110);
         return { routerPositions, networkPositions, canvasHeight };
       }
 
@@ -1005,7 +995,7 @@ INDEX_HTML = r"""<!doctype html>
         const routers = model.routers || [];
         const networks = model.networks || [];
         const allowed = new Set(model.router.firewall.allowed || []);
-        const { routerPositions, networkPositions, canvasHeight } = topologyGraphLayout(routers, networks);
+        const { routerPositions, networkPositions, canvasHeight } = topologyGraphLayout(routers, networks, model.visual);
         const parts = [];
 
         for (const router of routers) {
@@ -1091,7 +1081,7 @@ INDEX_HTML = r"""<!doctype html>
           const children = routers.filter((item) => item.parent_router_id === router.id).length;
           const attachedNetworks = networks.filter((network) => (network.router_ids || []).includes(router.id)).length;
           return `
-            <g class="graph-node router-node" transform="translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})">
+            <g class="graph-node router-node" data-drag-kind="router" data-node-id="${escapeHtml(router.id)}" transform="translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})">
               <rect x="-34" y="-26" width="68" height="52" rx="10"></rect>
               <text y="-3">${escapeHtml(router.name || router.id)}</text>
               <text class="subtext" y="14">${escapeHtml(`${attachedNetworks} nets, ${children} child${children === 1 ? '' : 'ren'}`)}</text>
@@ -1106,7 +1096,7 @@ INDEX_HTML = r"""<!doctype html>
           const routersText = attached.map((routerId) => (routerPositions[routerId]?.name || routerId)).join(' · ');
           const labels = `${network.hosts.length} host${network.hosts.length === 1 ? '' : 's'}`;
           return `
-            <g class="graph-node network-node" transform="translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})">
+            <g class="graph-node network-node" data-drag-kind="network" data-node-id="${escapeHtml(network.id)}" transform="translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})">
               <circle r="28"></circle>
               <text y="-2">${escapeHtml(network.name)}</text>
               <text class="subtext" y="14">${escapeHtml(labels)}</text>
@@ -1199,6 +1189,23 @@ INDEX_HTML = r"""<!doctype html>
         return String(value || '').replace(/[&<>"']/g, (ch) => ({
           '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;'
         })[ch]);
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function svgPointFromEvent(svg, event) {
+        const point = svg.createSVGPoint();
+        point.x = event.clientX;
+        point.y = event.clientY;
+        return point.matrixTransform(svg.getScreenCTM().inverse());
+      }
+
+      function saveGraphPosition(kind, id, x, y) {
+        model.visual = normalizeVisual(model.visual);
+        const bucket = kind === 'router' ? model.visual.routers : model.visual.networks;
+        bucket[id] = { x, y };
       }
 
       function setStatus(message) {
@@ -1319,6 +1326,44 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
 
+      firewallGraphEl.addEventListener('pointerdown', (event) => {
+        const node = event.target.closest?.('[data-drag-kind][data-node-id]');
+        if (!node || !model) return;
+        const svg = firewallGraphEl.querySelector('svg');
+        if (!svg) return;
+        event.preventDefault();
+        const kind = node.dataset.dragKind;
+        const id = node.dataset.nodeId;
+        const pos = svgPointFromEvent(svg, event);
+        const current = kind === 'router' ? model.visual?.routers?.[id] : model.visual?.networks?.[id];
+        dragState = {
+          kind,
+          id,
+          offsetX: pos.x - (current?.x ?? pos.x),
+          offsetY: pos.y - (current?.y ?? pos.y)
+        };
+        svg.setPointerCapture?.(event.pointerId);
+      });
+
+      document.addEventListener('pointermove', (event) => {
+        if (!dragState || !model) return;
+        const svg = firewallGraphEl.querySelector('svg');
+        if (!svg) return;
+        const pos = svgPointFromEvent(svg, event);
+        const width = 900;
+        const height = Number(svg.viewBox?.baseVal?.height) || 560;
+        const x = clamp(pos.x - dragState.offsetX, 60, width - 60);
+        const yMin = dragState.kind === 'router' ? 70 : 300;
+        const yMax = dragState.kind === 'router' ? 220 : height - 60;
+        const y = clamp(pos.y - dragState.offsetY, yMin, yMax);
+        saveGraphPosition(dragState.kind, dragState.id, x, y);
+        render();
+      });
+
+      document.addEventListener('pointerup', () => {
+        dragState = null;
+      });
+
       document.addEventListener('input', (event) => {
         if (!event.target.matches('input, select, textarea')) return;
         collect();
@@ -1404,6 +1449,8 @@ INDEX_HTML = r"""<!doctype html>
               setStatus('At least one network is required.');
               return;
             }
+            model.visual = normalizeVisual(model.visual);
+            delete model.visual.networks[model.networks[Number(event.target.dataset.networkIndex)].id];
             model.networks.splice(Number(event.target.dataset.networkIndex), 1);
             if (model.infrastructure?.hackerlab_network_id && !model.networks.find((network) => network.id === model.infrastructure.hackerlab_network_id)) {
               model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
@@ -1420,6 +1467,8 @@ INDEX_HTML = r"""<!doctype html>
               return;
             }
             const router = model.routers[index];
+            model.visual = normalizeVisual(model.visual);
+            delete model.visual.routers[router.id];
             const replacement = router.parent_router_id || model.routers[0]?.id || '';
             model.routers = model.routers.filter((item) => item.id !== router.id);
             model.routers.forEach((item) => {
