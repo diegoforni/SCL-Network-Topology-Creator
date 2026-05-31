@@ -1065,7 +1065,15 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       document.addEventListener('input', (event) => {
-        if (event.target.matches('input, select, textarea')) collect();
+        if (!event.target.matches('input, select, textarea')) return;
+        collect();
+        if (
+          event.target.matches('[data-network-router]') ||
+          event.target.matches('[data-field="network.default_router_id"]') ||
+          event.target.matches('[data-field="router.parent_router_id"]')
+        ) {
+          render();
+        }
       });
 
       document.addEventListener('click', async (event) => {
@@ -1097,7 +1105,6 @@ INDEX_HTML = r"""<!doctype html>
           }
           if (event.target.id === 'hackerlabNetwork') {
             collect();
-            render();
             return;
           }
           if (event.target.id === 'addRouter') {
