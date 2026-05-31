@@ -909,36 +909,28 @@ INDEX_HTML = r"""<!doctype html>
           });
         });
         const networkPositions = {};
-        const buckets = new Map();
         networks.forEach((network) => {
-          const owner = network.default_router_id || network.router_ids?.[0] || routers[0]?.id || '';
-          if (!buckets.has(owner)) buckets.set(owner, []);
-          buckets.get(owner).push(network);
-        });
-        const baseY = Math.min(height - 95, topMargin + Math.max(routerLevels.length - 1, 1) * levelGap + 170);
-        let row = 0;
-        buckets.forEach((bucket, owner) => {
-          const ownerPos = routerPositions[owner] || { x: width / 2 };
-          const spread = Math.min(220, 70 + bucket.length * 35);
-          bucket.forEach((network, index) => {
-            const offset = bucket.length === 1 ? 0 : (index - (bucket.length - 1) / 2) * (spread / Math.max(bucket.length - 1, 1));
-            networkPositions[network.id] = {
-              ...network,
-              x: Math.max(70, Math.min(width - 70, ownerPos.x + offset)),
-              y: baseY + row * 44
-            };
-          });
-          row += 1;
+          const attached = Array.from(new Set(network.router_ids || [network.default_router_id || routers[0]?.id || ''])).filter(Boolean);
+          const anchors = attached.map((routerId) => routerPositions[routerId]).filter(Boolean);
+          const fallbackRouter = routerPositions[network.default_router_id || attached[0] || routers[0]?.id || ''];
+          const x = anchors.length ? anchors.reduce((sum, item) => sum + item.x, 0) / anchors.length : (fallbackRouter?.x || width / 2);
+          const anchorDepth = anchors.length ? Math.max(...anchors.map((item) => item.depth || 0)) : (fallbackRouter?.depth || 0);
+          const y = Math.min(height - 70, topMargin + (anchorDepth + 1) * (levelGap || 110) + 72);
+          networkPositions[network.id] = {
+            ...network,
+            x: Math.max(70, Math.min(width - 70, x)),
+            y
+          };
         });
         networks.forEach((network, index) => {
           if (networkPositions[network.id]) return;
           networkPositions[network.id] = {
             ...network,
             x: 110 + ((index * 190) % Math.max(width - 220, 1)),
-            y: baseY + (row + Math.floor(index / 4)) * 44
+            y: Math.min(height - 70, topMargin + Math.max(routerLevels.length, 1) * (levelGap || 110) + 72 + Math.floor(index / 4) * 44)
           };
         });
-        return { routerPositions, networkPositions, baseY, levelGap };
+        return { routerPositions, networkPositions };
       }
 
       function firewallGraphTemplate() {
@@ -1256,6 +1248,8 @@ INDEX_HTML = r"""<!doctype html>
         if (!event.target.matches('input, select, textarea')) return;
         collect();
         if (
+          event.target.closest('[data-network]') ||
+          event.target.closest('[data-router]') ||
           event.target.matches('[data-network-router]') ||
           event.target.matches('[data-field="network.default_router_id"]') ||
           event.target.matches('[data-field="router.parent_router_id"]')
