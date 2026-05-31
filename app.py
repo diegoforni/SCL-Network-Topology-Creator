@@ -80,17 +80,22 @@ INDEX_HTML = r"""<!doctype html>
         --ok: #18794e;
       }
       * { box-sizing: border-box; }
+      html, body {
+        min-height: 100%;
+      }
       body {
         margin: 0;
         background: var(--bg);
         color: var(--ink);
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        min-height: 100vh;
       }
       main {
         width: 100%;
         max-width: none;
         margin: 0 auto;
         padding: 18px 20px 22px;
+        min-height: 100vh;
       }
       header {
         display: flex;
@@ -150,7 +155,8 @@ INDEX_HTML = r"""<!doctype html>
         display: grid;
         grid-template-columns: minmax(0, 1fr) minmax(420px, 0.78fr);
         gap: 18px;
-        align-items: start;
+        align-items: stretch;
+        min-height: calc(100vh - 120px);
       }
       .panel {
         background: var(--panel);
@@ -158,6 +164,7 @@ INDEX_HTML = r"""<!doctype html>
         border-radius: 8px;
         padding: 16px;
         min-width: 0;
+        min-height: 100%;
       }
       .row {
         display: grid;
@@ -492,18 +499,23 @@ INDEX_HTML = r"""<!doctype html>
       .router-list {
         display: grid;
         gap: 12px;
+        min-height: 100%;
       }
       .router-card {
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 12px;
         background: #f7fbff;
+        min-height: 100%;
       }
       .router-card.root {
         background: #eef6ff;
       }
       @media (max-width: 920px) {
-        .grid { grid-template-columns: 1fr; }
+        .grid {
+          grid-template-columns: 1fr;
+          min-height: auto;
+        }
         .span-2, .span-3, .span-4, .span-5, .span-6, .span-8 { grid-column: span 12; }
       }
     </style>
@@ -2028,13 +2040,15 @@ def router_descendant_networks(router_id, children_map, networks_by_router):
     return nets
 
 
-def router_script(topology, router, descendant_networks, child_routes, is_root):
+def router_script(topology, router, descendant_networks, child_routes, transit_subnets, is_root, default_source_ip=''):
     allowed_pairs = set(topology.get('router', {}).get('firewall', {}).get('allowed', []))
     forward_rules = []
     if is_root:
         for network in descendant_networks:
             if network.get('internet'):
                 forward_rules.append(f"ip saddr {network['cidr']} oifname \"$$wan_if\" accept")
+        for subnet in transit_subnets:
+            forward_rules.append(f"ip saddr {subnet} oifname \"$$wan_if\" accept")
     for source in topology.get('networks', []):
         for dest in topology.get('networks', []):
             if source['id'] == dest['id']:
@@ -2045,7 +2059,8 @@ def router_script(topology, router, descendant_networks, child_routes, is_root):
         forward_rules.append('counter drop')
     route_lines = []
     if not is_root and router.get('parent_transit_ip'):
-        route_lines.append(f"ip route replace default via {router['parent_transit_ip']} || true")
+        src_clause = f" src {default_source_ip}" if default_source_ip else ''
+        route_lines.append(f"ip route replace default via {router['parent_transit_ip']}{src_clause} || true")
     for route in child_routes:
         route_lines.append(f"ip route replace {route['cidr']} via {route['via']} || true")
     if not route_lines:
@@ -2056,15 +2071,17 @@ def router_script(topology, router, descendant_networks, child_routes, is_root):
 table ip nat {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    oifname "$wan_if" masquerade
+    oifname "$$wan_if" masquerade
   }
 }
 """ if is_root else ''
     return f"""set -eu
 sysctl -w net.ipv4.ip_forward=1 || true
+sysctl -w net.ipv4.conf.all.rp_filter=0 || true
+sysctl -w net.ipv4.conf.default.rp_filter=0 || true
 {route_block}
 {router_management_block(router)}
-wan_if="$(ip route show default | awk '{{print $5; exit}}')"
+wan_if="$(ip route show default | awk '{{print $$5; exit}}')"
 cat > /tmp/router-rules.nft <<EOF
 flush ruleset
 table inet filter {{
@@ -2110,6 +2127,12 @@ def generate_compose(topology):
         network_router_ip_maps[network['id']] = network_router_ips(network, router_ids)
         for router_id in router_ids:
             router_network_attaches.setdefault(router_id, []).append(network)
+    router_default_source_ips = {}
+    for router_id, attached_networks in router_network_attaches.items():
+        if not attached_networks:
+            continue
+        preferred_network = next((network for network in topology['networks'] if network.get('default_router_id') == router_id), attached_networks[0])
+        router_default_source_ips[router_id] = network_router_ip_maps[preferred_network['id']].get(router_id, router_ip(preferred_network['cidr']))
 
     transit_links = []
     child_routes = {router_id: [] for router_id in router_by_id}
@@ -2157,7 +2180,9 @@ def generate_compose(topology):
             {**router, 'parent_transit_ip': parent_ip_map.get(router_id, '')},
             descendant_networks,
             child_routes.get(router_id, []),
+            [link['subnet'] for link in transit_links],
             router_id == root_router_id,
+            router_default_source_ips.get(router_id, ''),
         )
         compose['services'][service_name] = {
             'image': BASE_IMAGE,
