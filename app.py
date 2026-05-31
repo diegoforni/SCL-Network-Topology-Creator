@@ -2111,7 +2111,7 @@ def compose_project_name(topology_id):
 
 
 def topology_network_name(topology_id, network_id):
-    return f'{compose_project_name(topology_id)}-topo_{network_id}'
+    return f'{compose_project_name(topology_id)}-{network_id}'
 
 
 def hackerlab_container_name(topology_id):
