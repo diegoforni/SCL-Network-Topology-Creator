@@ -2072,6 +2072,8 @@ def save_topology(payload):
     with open(compose_path(topology_id), 'w', encoding='utf8') as file:
         json.dump(compose, file, indent=2)
         file.write('\n')
+    if is_running(topology_id):
+        sync_hackerlab_runtime(topology)
     return topology
 
 
@@ -2107,6 +2109,14 @@ def compose_project_name(topology_id):
     return f'SCL-topology-{topology_id}'
 
 
+def topology_network_name(topology_id, network_id):
+    return f'{compose_project_name(topology_id)}-topo_{network_id}'
+
+
+def hackerlab_container_name(topology_id):
+    return f'{compose_project_name(topology_id)}-hackerlab'
+
+
 def run_compose(topology_id, args):
     file = compose_path(topology_id)
     if not file.exists():
@@ -2121,12 +2131,68 @@ def run_compose(topology_id, args):
 def start_topology(topology_id):
     ensure_base_image()
     run_compose(topology_id, ['up', '-d'])
+    topology = read_json(topology_path(topology_id))
+    sync_hackerlab_runtime(topology)
     return {'status': 'started'}
 
 
 def stop_topology(topology_id):
     run_compose(topology_id, ['down'])
     return {'status': 'stopped'}
+
+
+def docker_inspect_json(args):
+    result = subprocess.run(['docker'] + args, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout or f'Docker command failed: {args}')
+    output = result.stdout.strip()
+    if not output:
+        return {}
+    return json.loads(output)
+
+
+def docker_run(args):
+    result = subprocess.run(['docker'] + args, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout or f'Docker command failed: {args}')
+    return result.stdout
+
+
+def sync_hackerlab_runtime(topology):
+    infrastructure = topology.get('infrastructure') or {}
+    network_id = infrastructure.get('hackerlab_network_id')
+    networks = topology.get('networks') or []
+    selected_network = next((network for network in networks if network.get('id') == network_id), None)
+    if not selected_network:
+        return {'status': 'skipped'}
+    container_name = hackerlab_container_name(topology['id'])
+    selected_network_name = topology_network_name(topology['id'], selected_network['id'])
+    router_ids = selected_network.get('router_ids') or [selected_network.get('default_router_id') or '']
+    router_ids = [router_id for router_id in dict.fromkeys(router_ids) if router_id]
+    if not router_ids:
+        router_ids = [selected_network.get('default_router_id') or '']
+    ip_map = network_router_ips(selected_network, router_ids)
+    gateway_router_id = selected_network.get('default_router_id') or router_ids[0]
+    gateway_ip = ip_map.get(gateway_router_id) or router_ip(selected_network['cidr'])
+    hacker_ip = hackerlab_ip(selected_network['cidr'])
+    try:
+        current_networks = docker_inspect_json(['inspect', '-f', '{{json .NetworkSettings.Networks}}', container_name]) or {}
+    except Exception:
+        return {'status': 'missing'}
+    attached_network_names = [name for name in current_networks.keys() if name.startswith(compose_project_name(topology['id'])) and name != 'playground-net']
+    for network_name in attached_network_names:
+        if network_name != selected_network_name:
+            try:
+                docker_run(['network', 'disconnect', '-f', network_name, container_name])
+            except Exception:
+                pass
+    try:
+        docker_run(['network', 'disconnect', '-f', selected_network_name, container_name])
+    except Exception:
+        pass
+    docker_run(['network', 'connect', '--ip', hacker_ip, selected_network_name, container_name])
+    docker_run(['exec', container_name, 'sh', '-lc', f'ip route replace default via {gateway_ip} || true'])
+    return {'status': 'updated', 'network': selected_network_name}
 
 
 def is_running(topology_id):
