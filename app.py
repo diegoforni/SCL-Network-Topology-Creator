@@ -1047,9 +1047,8 @@ INDEX_HTML = r"""<!doctype html>
             const midX = (sourcePos.x + targetPos.x) / 2;
             const midY = (sourcePos.y + targetPos.y) / 2;
             const length = Math.max(Math.hypot(dx, dy), 1);
-            const direction = sourceIndex < targetIndex ? 1 : -1;
             const pairGap = 34 + (Math.abs(sourceIndex - targetIndex) * 10);
-            const offset = direction * Math.min(120, pairGap + (length * 0.12));
+            const offset = Math.min(140, pairGap + (length * 0.12));
             const perpX = (-dy / length) * offset;
             const perpY = (dx / length) * offset;
             const cx = midX + perpX;
@@ -1069,7 +1068,7 @@ INDEX_HTML = r"""<!doctype html>
                 </path>
                 <text
                   class="graph-edge-label ${isAllowed ? 'allowed' : 'blocked'}"
-                  x="${(cx + ((direction > 0 ? 1 : -1) * 4)).toFixed(1)}"
+                  x="${cx.toFixed(1)}"
                   y="${(cy - 8).toFixed(1)}"
                 >${escapeHtml(`${source.name} → ${target.name}`)}</text>
               </g>
