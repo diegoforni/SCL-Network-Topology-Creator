@@ -1837,7 +1837,7 @@ def transit_network_key(parent_id, child_id):
 
 
 def transit_subnet(index):
-    return f"10.250.{index}.0/30"
+    return f"10.250.{index}.0/29"
 
 
 def network_router_ips(network, router_ids):
@@ -1928,7 +1928,7 @@ nft -f /tmp/router-rules.nft || true
 
 
 def generate_compose(topology):
-    project_prefix = f"SCL-topology-{topology['id']}"
+    project_prefix = f"scl-topology-{topology['id']}"
     routers = topology.get('routers') or []
     if not routers:
         routers = defaultRouters()
@@ -1964,8 +1964,8 @@ def generate_compose(topology):
     for parent_id, child_ids in children_map.items():
         for child_id in child_ids:
             subnet = transit_subnet(transit_index)
-            parent_ip = f'10.250.{transit_index}.1'
-            child_ip = f'10.250.{transit_index}.2'
+            parent_ip = f'10.250.{transit_index}.2'
+            child_ip = f'10.250.{transit_index}.3'
             key = transit_network_key(parent_id, child_id)
             transit_links.append({
                 'key': key,
@@ -2040,21 +2040,6 @@ def generate_compose(topology):
                     f'scl.host_type={host["type"]}',
                 ],
             }
-        if network['id'] == topology.get('infrastructure', {}).get('hackerlab_network_id'):
-            compose['services']['hackerlab'] = {
-                'image': 'scl-hackerlab',
-                'container_name': f'{project_prefix}-hackerlab',
-                'hostname': 'hackerlab',
-                'cap_add': ['NET_ADMIN'],
-                'command': ['sh', '-lc', hackerlab_script(network, gateway_ip)],
-                'networks': {network_key: {'ipv4_address': hackerlab_ip(network['cidr'])}},
-                'labels': [
-                    'scl.plugin=network-topology',
-                    f'scl.topology={topology["id"]}',
-                    f'scl.network={network["id"]}',
-                    'scl.host_type=hackerlab',
-                ],
-            }
     return compose
 
 
@@ -2107,7 +2092,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 
 def compose_project_name(topology_id):
-    return f'SCL-topology-{topology_id}'
+    return f'scl-topology-{topology_id}'
 
 
 def topology_network_name(topology_id, network_id):
@@ -2149,8 +2134,16 @@ def run_compose(topology_id, args):
 
 def start_topology(topology_id):
     ensure_base_image()
-    run_compose(topology_id, ['up', '-d'])
     topology = read_json(topology_path(topology_id))
+    compose = generate_compose(topology)
+    with open(compose_path(topology_id), 'w', encoding='utf8') as file:
+        json.dump(compose, file, indent=2)
+        file.write('\n')
+    try:
+        run_compose(topology_id, ['down'])
+    except Exception:
+        pass
+    run_compose(topology_id, ['up', '-d', '--remove-orphans'])
     sync_hackerlab_runtime(topology)
     return {'status': 'started'}
 
