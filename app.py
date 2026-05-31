@@ -182,6 +182,33 @@ INDEX_HTML = r"""<!doctype html>
       .host {
         background: white;
       }
+      .host-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .host-head h4 {
+        margin: 0;
+        font-size: 15px;
+      }
+      .inline-ip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: #475569;
+        font-size: 12px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+      .inline-ip code {
+        font: inherit;
+        background: #eef2ff;
+        color: #1d4ed8;
+        border-radius: 999px;
+        padding: 1px 7px;
+      }
       .network {
         background: #f8fbff;
         position: relative;
@@ -274,6 +301,26 @@ INDEX_HTML = r"""<!doctype html>
       }
       .checkbox-line input {
         width: auto;
+      }
+      .interface-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .interface-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 10px;
+        border-radius: 999px;
+        background: #f8fafc;
+        border: 1px solid #d6dee8;
+        color: #334155;
+        font-size: 12px;
+        font-weight: 600;
+      }
+      .interface-pill strong {
+        color: #0f172a;
       }
       .firewall-graph {
         border: 1px solid var(--line);
@@ -759,6 +806,7 @@ INDEX_HTML = r"""<!doctype html>
         const isRoot = index === 0;
         const children = model.routers.filter((item) => item.parent_router_id === router.id).length;
         const attachedNetworks = model.networks.filter((network) => (network.router_ids || []).includes(router.id)).length;
+        const interfaceEntries = routerInterfaceEntries(router, model.routers, model.networks);
         return `
           <div class="router-card ${isRoot ? 'root' : ''}" data-router="${index}">
             <div class="network-head">
@@ -798,6 +846,17 @@ INDEX_HTML = r"""<!doctype html>
                   <span class="pill">${children} child router${children === 1 ? '' : 's'}</span>
                 </div>
               </div>
+              <div class="span-12">
+                <label>Interfaces</label>
+                <div class="interface-list">
+                  ${interfaceEntries.length ? interfaceEntries.map((item) => `
+                    <span class="interface-pill">
+                      <strong>${escapeHtml(item.label)}</strong>
+                      <code>${escapeHtml(item.ip)}</code>
+                    </span>
+                  `).join('') : '<span class="muted">No interfaces assigned yet.</span>'}
+                </div>
+              </div>
             </div>
           </div>
         `;
@@ -815,28 +874,37 @@ INDEX_HTML = r"""<!doctype html>
       function routerSelectOptions(selected, allowedIds = null) {
         return model.routers
           .filter((router) => !allowedIds || allowedIds.includes(router.id))
-          .map((router) => `<option value="${escapeHtml(router.id)}" ${router.id === selected ? 'selected' : ''}>${escapeHtml(router.name || router.id)}</option>`)
+          .map((router) => {
+            const network = model.networks.find((item) => (item.router_ids || []).includes(router.id));
+            const ip = network ? networkRouterIps(network, network.router_ids || [router.id])[router.id] : '';
+            const label = `${router.name || router.id}${ip ? ` — ${ip}` : ''}`;
+            return `<option value="${escapeHtml(router.id)}" ${router.id === selected ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+          })
           .join('');
       }
 
       function routerAttachmentOptions(network) {
+        const ipMap = networkRouterIps(network, network.router_ids || [network.default_router_id || model.routers[0]?.id || '']);
         return model.routers.map((router) => {
           const checked = (network.router_ids || []).includes(router.id) ? 'checked' : '';
+          const ip = ipMap[router.id] ? ` <span class="inline-ip">IP <code>${escapeHtml(ipMap[router.id])}</code></span>` : '';
           return `
             <label class="checkbox-line">
               <input type="checkbox" data-network-router="${escapeHtml(router.id)}" ${checked}>
-              <span>${escapeHtml(router.name || router.id)}</span>
+              <span>${escapeHtml(router.name || router.id)}${ip}</span>
             </label>
           `;
         }).join('');
       }
 
       function networkTemplate(network, index) {
+        const ipMap = networkRouterIps(network, network.router_ids || [network.default_router_id || model.routers[0]?.id || '']);
+        const gatewayIp = ipMap[network.default_router_id || network.router_ids?.[0] || ''] || '';
         return `
           <div class="network" data-network="${index}">
             <div class="network-banner">
               <span class="label">Network ${index + 1}</span>
-              <span class="meta"><strong>${escapeHtml(network.name || `Network ${index + 1}`)}</strong> ${escapeHtml(network.cidr)}</span>
+              <span class="meta"><strong>${escapeHtml(network.name || `Network ${index + 1}`)}</strong> ${escapeHtml(network.cidr)}${gatewayIp ? ` · GW ${escapeHtml(gatewayIp)}` : ''}</span>
             </div>
             <div class="network-head">
               <h3>${escapeHtml(network.name || `Network ${index + 1}`)}</h3>
@@ -890,8 +958,14 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function hostTemplate(host, networkIndex, hostIndex) {
+        const network = model.networks[networkIndex];
+        const hostIp = network ? networkHostIp(network.cidr, hostIndex + 1) : '';
         return `
           <div class="host" data-host="${hostIndex}">
+            <div class="host-head">
+              <h4>${escapeHtml(host.name || `host-${hostIndex + 1}`)}</h4>
+              <span class="inline-ip">IP <code>${escapeHtml(hostIp)}</code></span>
+            </div>
             <div class="row">
               <div class="span-3">
                 <label>Host name</label>
@@ -958,6 +1032,80 @@ INDEX_HTML = r"""<!doctype html>
         }
         routers.forEach((router) => depth(router.id));
         return depthMap;
+      }
+
+      function subnetPrefix(cidr) {
+        return String(cidr || '').split('/')[0].replace(/\.\d+$/, '');
+      }
+
+      function networkHostIp(cidr, hostIndex) {
+        return `${subnetPrefix(cidr)}.${10 + hostIndex}`;
+      }
+
+      function networkRouterIps(network, routerIds) {
+        const assigned = Array.from(new Set(routerIds || []));
+        const ipMap = {};
+        assigned.forEach((routerId, offset) => {
+          const hostOctet = offset === 0 ? 254 : Math.max(240, 254 - offset);
+          ipMap[routerId] = `${subnetPrefix(network.cidr)}.${hostOctet}`;
+        });
+        return ipMap;
+      }
+
+      function buildRouterMaps(routers, networks) {
+        const byId = new Map(routers.map((router) => [router.id, router]));
+        const children = new Map(routers.map((router) => [router.id, []]));
+        routers.forEach((router) => {
+          if (router.parent_router_id && children.has(router.parent_router_id)) {
+            children.get(router.parent_router_id).push(router.id);
+          }
+        });
+        return { byId, children };
+      }
+
+      function buildTransitLinks(routers, childrenMap) {
+        const links = [];
+        const root = routers[0]?.id || '';
+        let transitIndex = 1;
+        function walk(parentId) {
+          const children = childrenMap.get(parentId) || [];
+          children.forEach((childId) => {
+            const parentIp = `10.250.${transitIndex}.2`;
+            const childIp = `10.250.${transitIndex}.3`;
+            links.push({ parentId, childId, parentIp, childIp });
+            transitIndex += 1;
+            walk(childId);
+          });
+        }
+        if (root) walk(root);
+        return links;
+      }
+
+      function routerInterfaceEntries(router, routers, networks) {
+        const { byId, children } = buildRouterMaps(routers, networks);
+        const entries = [];
+        networks.forEach((network) => {
+          if (!(network.router_ids || []).includes(router.id)) return;
+          const ip = networkRouterIps(network, network.router_ids || [network.default_router_id || router.id])[router.id];
+          if (ip) {
+            entries.push({
+              kind: 'network',
+              label: `${network.name}${network.default_router_id === router.id ? ' (gw)' : ''}`,
+              ip
+            });
+          }
+        });
+        const transitLinks = buildTransitLinks(routers, children).filter((link) => link.parentId === router.id || link.childId === router.id);
+        transitLinks.forEach((link) => {
+          const otherId = link.parentId === router.id ? link.childId : link.parentId;
+          const otherName = byId.get(otherId)?.name || otherId;
+          entries.push({
+            kind: 'transit',
+            label: `transit ${link.parentId === router.id ? 'to' : 'from'} ${otherName}`,
+            ip: link.parentId === router.id ? link.parentIp : link.childIp
+          });
+        });
+        return entries;
       }
 
       function topologyGraphLayout(routers, networks, visual = null, width = 900, height = 560) {
@@ -1081,11 +1229,17 @@ INDEX_HTML = r"""<!doctype html>
           if (!pos) return '';
           const children = routers.filter((item) => item.parent_router_id === router.id).length;
           const attachedNetworks = networks.filter((network) => (network.router_ids || []).includes(router.id)).length;
+          const interfaceEntries = routerInterfaceEntries(router, routers, networks);
+          const networkInterfaces = interfaceEntries.filter((item) => item.kind === 'network');
+          const transitInterfaces = interfaceEntries.filter((item) => item.kind === 'transit');
+          const networkText = networkInterfaces.length ? networkInterfaces.map((item) => `${item.label}: ${item.ip}`).join(' · ') : 'No network interfaces';
+          const transitText = transitInterfaces.length ? transitInterfaces.map((item) => `${item.label}: ${item.ip}`).join(' · ') : '';
           return `
             <g class="graph-node router-node" data-drag-kind="router" data-node-id="${escapeHtml(router.id)}" transform="translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})">
-              <rect x="-34" y="-26" width="68" height="52" rx="10"></rect>
-              <text y="-3">${escapeHtml(router.name || router.id)}</text>
-              <text class="subtext" y="14">${escapeHtml(`${attachedNetworks} nets, ${children} child${children === 1 ? '' : 'ren'}`)}</text>
+              <rect x="-62" y="-36" width="124" height="82" rx="10"></rect>
+              <text y="-13">${escapeHtml(router.name || router.id)}</text>
+              <text class="subtext" y="5">${escapeHtml(networkText)}</text>
+              ${transitText ? `<text class="subtext" y="21">${escapeHtml(transitText)}</text>` : ''}
             </g>
           `;
         }).join('');
