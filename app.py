@@ -187,21 +187,31 @@ INDEX_HTML = r"""<!doctype html>
         position: relative;
         box-shadow: inset 4px 0 0 #2563eb;
       }
-      .network::before {
-        content: 'Network';
-        display: inline-flex;
+      .network-banner {
+        display: flex;
+        justify-content: space-between;
         align-items: center;
-        height: 24px;
+        gap: 12px;
         margin: -12px -12px 12px;
-        padding: 0 12px;
+        padding: 10px 12px;
         background: linear-gradient(90deg, #dbeafe, #eff6ff);
         border-bottom: 1px solid #cfe0fb;
         border-radius: 8px 8px 0 0;
         color: #1e40af;
+      }
+      .network-banner .label {
         font-size: 11px;
-        font-weight: 700;
+        font-weight: 800;
         letter-spacing: 0;
         text-transform: uppercase;
+      }
+      .network-banner .meta {
+        font-size: 12px;
+        font-weight: 600;
+        color: #334155;
+      }
+      .network-banner .meta strong {
+        color: #0f172a;
       }
       .network-head {
         display: flex;
@@ -752,6 +762,10 @@ INDEX_HTML = r"""<!doctype html>
       function networkTemplate(network, index) {
         return `
           <div class="network" data-network="${index}">
+            <div class="network-banner">
+              <span class="label">Network ${index + 1}</span>
+              <span class="meta"><strong>${escapeHtml(network.name || `Network ${index + 1}`)}</strong> ${escapeHtml(network.cidr)}</span>
+            </div>
             <div class="network-head">
               <h3>${escapeHtml(network.name || `Network ${index + 1}`)}</h3>
               <div class="toolbar">
