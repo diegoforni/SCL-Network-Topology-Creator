@@ -232,6 +232,7 @@ INDEX_HTML = r"""<!doctype html>
       }
       .pill.ok { color: var(--ok); border-color: #9bd3b5; }
       .pill.bad { color: var(--danger); border-color: #e5aaa3; }
+      .pill.busy { color: #a05c00; border-color: #f1cc8e; }
       .checkbox-line {
         display: flex;
         align-items: center;
@@ -371,7 +372,7 @@ INDEX_HTML = r"""<!doctype html>
               <input id="defaultHosts" type="number" min="1" max="12" value="3">
             </div>
           </div>
-          <p class="muted">Each topology is a single lab: all networks attach to the same router, and SSH is enabled per host when you need direct access.</p>
+          <p class="muted">Create routed Ubuntu-based SCL labs with segmented networks, multiple routers per network, firewall rules, users, and generated data.</p>
           <div class="router-box">
             <h3>Router</h3>
             <div class="row">
@@ -411,6 +412,7 @@ INDEX_HTML = r"""<!doctype html>
               <h3>Routers</h3>
               <button class="secondary" id="addRouter">Add router</button>
             </div>
+            <p class="muted" style="margin: 0 0 10px">Attach any network to one or more routers. The selected default gateway router is the one hosts use as their primary path.</p>
             <div id="routers" class="router-list"></div>
           </div>
           <div class="toolbar">
@@ -456,6 +458,8 @@ INDEX_HTML = r"""<!doctype html>
       let model = null;
       let saved = [];
       let selectedId = null;
+      let busyTopologyId = '';
+      let busyTopologyAction = '';
 
       function roleOptions(selected) {
         return Object.entries(HOST_TYPES).map(([value, info]) => {
@@ -518,7 +522,8 @@ INDEX_HTML = r"""<!doctype html>
         const nets = defaultNetworks(count, hosts);
         const routers = defaultRouters();
         nets.forEach((network) => {
-          network.router_id = routers[0].id;
+          network.router_ids = [routers[0].id];
+          network.default_router_id = routers[0].id;
         });
         model = {
           id: selectedId,
@@ -552,8 +557,9 @@ INDEX_HTML = r"""<!doctype html>
           model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
         }
         model.networks.forEach((network) => {
-          if (!network.router_id || !model.routers.find((router) => router.id === network.router_id)) {
-            network.router_id = model.routers[0]?.id || '';
+          normalizeNetworkRouters(network);
+          if (!network.router_ids.includes(network.default_router_id)) {
+            network.default_router_id = network.router_ids[0] || model.routers[0]?.id || '';
           }
         });
         topologyName.value = model.name || '';
@@ -567,6 +573,25 @@ INDEX_HTML = r"""<!doctype html>
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
         firewallGraphEl.innerHTML = firewallGraphTemplate();
         selectedJsonEl.value = JSON.stringify(collect(), null, 2);
+      }
+
+      function normalizeNetworkRouters(network) {
+        const validRouterIds = new Set((model.routers || []).map((router) => router.id));
+        const legacyRouterId = network.router_id || '';
+        const routerIds = Array.isArray(network.router_ids) ? network.router_ids.slice() : [];
+        if (legacyRouterId && !routerIds.includes(legacyRouterId)) {
+          routerIds.unshift(legacyRouterId);
+        }
+        if (!routerIds.length) {
+          routerIds.push(model.routers[0]?.id || '');
+        }
+        const unique = Array.from(new Set(routerIds.filter((routerId) => validRouterIds.has(routerId))));
+        const defaultId = network.default_router_id && validRouterIds.has(network.default_router_id) ? network.default_router_id : unique[0];
+        network.router_ids = [defaultId, ...unique.filter((routerId) => routerId !== defaultId)];
+        if (!network.router_ids.length) {
+          network.router_ids = [model.routers[0]?.id || ''];
+        }
+        network.default_router_id = network.router_ids[0];
       }
 
       function normalizeRouters(routers) {
@@ -604,7 +629,7 @@ INDEX_HTML = r"""<!doctype html>
       function routerTemplate(router, index) {
         const isRoot = index === 0;
         const children = model.routers.filter((item) => item.parent_router_id === router.id).length;
-        const attachedNetworks = model.networks.filter((network) => network.router_id === router.id).length;
+        const attachedNetworks = model.networks.filter((network) => (network.router_ids || []).includes(router.id)).length;
         return `
           <div class="router-card ${isRoot ? 'root' : ''}" data-router="${index}">
             <div class="network-head">
@@ -658,8 +683,23 @@ INDEX_HTML = r"""<!doctype html>
         return options.join('');
       }
 
-      function routerSelectOptions(selected) {
-        return model.routers.map((router) => `<option value="${escapeHtml(router.id)}" ${router.id === selected ? 'selected' : ''}>${escapeHtml(router.name || router.id)}</option>`).join('');
+      function routerSelectOptions(selected, allowedIds = null) {
+        return model.routers
+          .filter((router) => !allowedIds || allowedIds.includes(router.id))
+          .map((router) => `<option value="${escapeHtml(router.id)}" ${router.id === selected ? 'selected' : ''}>${escapeHtml(router.name || router.id)}</option>`)
+          .join('');
+      }
+
+      function routerAttachmentOptions(network) {
+        return model.routers.map((router) => {
+          const checked = (network.router_ids || []).includes(router.id) ? 'checked' : '';
+          return `
+            <label class="checkbox-line">
+              <input type="checkbox" data-network-router="${escapeHtml(router.id)}" ${checked}>
+              <span>${escapeHtml(router.name || router.id)}</span>
+            </label>
+          `;
+        }).join('');
       }
 
       function networkTemplate(network, index) {
@@ -691,9 +731,16 @@ INDEX_HTML = r"""<!doctype html>
                   <span>Allow egress</span>
                 </div>
               </div>
+              <div class="span-12">
+                <label>Attached routers</label>
+                <div class="toolbar">
+                  ${routerAttachmentOptions(network)}
+                </div>
+                <p class="muted" style="margin: 6px 0 0">Attach one or more routers. The default gateway router is the one hosts use for outbound traffic.</p>
+              </div>
               <div class="span-6">
-                <label>Router</label>
-                <select data-field="network.router_id">${routerSelectOptions(network.router_id)}</select>
+                <label>Default gateway router</label>
+                <select data-field="network.default_router_id">${routerSelectOptions(network.default_router_id || network.router_ids?.[0], network.router_ids || [])}</select>
               </div>
             </div>
             <div class="toolbar" style="margin: 10px 0">
@@ -854,7 +901,13 @@ INDEX_HTML = r"""<!doctype html>
           network.name = valueOf(networkEl, 'network.name') || network.name;
           network.cidr = valueOf(networkEl, 'network.cidr') || network.cidr;
           network.internet = checkedOf(networkEl, 'network.internet');
-          network.router_id = valueOf(networkEl, 'network.router_id') || model.routers[0]?.id || '';
+          network.default_router_id = valueOf(networkEl, 'network.default_router_id') || model.routers[0]?.id || '';
+          const attached = Array.from(networkEl.querySelectorAll('[data-network-router]:checked')).map((el) => el.dataset.networkRouter);
+          if (!attached.includes(network.default_router_id)) {
+            attached.unshift(network.default_router_id);
+          }
+          network.router_ids = Array.from(new Set(attached.length ? attached : [network.default_router_id]));
+          network.router_id = network.default_router_id;
           network.hosts = network.hosts.map((host, hostIndex) => {
             const hostEl = networkEl.querySelector(`[data-host="${hostIndex}"]`);
             if (!hostEl) return host;
@@ -925,13 +978,13 @@ INDEX_HTML = r"""<!doctype html>
           <div class="saved-item">
             <h3>
               <span>${escapeHtml(item.name)}</span>
-              <span class="pill ${item.running ? 'ok' : ''}">${item.running ? 'running' : 'stopped'}</span>
+              <span class="pill ${busyTopologyId === item.id ? 'busy' : (item.running ? 'ok' : '')}">${busyTopologyId === item.id ? `${busyTopologyAction}...` : (item.running ? 'running' : 'stopped')}</span>
             </h3>
             <p>${item.networks} network(s), ${item.hosts} host(s)</p>
             <div class="toolbar">
-              <button class="secondary" data-action="load-topology" data-id="${item.id}">Load</button>
-              <button data-action="start-topology" data-id="${item.id}">Start</button>
-              <button class="secondary" data-action="stop-topology" data-id="${item.id}">Stop</button>
+              <button class="secondary" data-action="load-topology" data-id="${item.id}" ${busyTopologyId ? 'disabled' : ''}>Load</button>
+              <button data-action="start-topology" data-id="${item.id}" ${busyTopologyId ? 'disabled' : ''}>${busyTopologyId === item.id && busyTopologyAction === 'Starting topology' ? 'Starting...' : 'Start'}</button>
+              <button class="secondary" data-action="stop-topology" data-id="${item.id}" ${busyTopologyId ? 'disabled' : ''}>${busyTopologyId === item.id && busyTopologyAction === 'Stopping topology' ? 'Stopping...' : 'Stop'}</button>
             </div>
           </div>
         `).join('') : '<p class="muted">No saved topologies yet.</p>';
@@ -957,19 +1010,37 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       async function startTopology(id) {
+        if (busyTopologyId) return;
+        busyTopologyId = id;
+        busyTopologyAction = 'Starting topology';
         setStatus('Starting topology. The first run may build the Ubuntu base image.');
-        const job = await api(`api/topologies/${encodeURIComponent(id)}/start`, { method: 'POST', body: '{}' });
-        await waitForJob(job.job_id, 'Starting topology. The first run may build the Ubuntu base image.');
-        setStatus('Topology started.');
         await refreshSaved();
+        try {
+          const job = await api(`api/topologies/${encodeURIComponent(id)}/start`, { method: 'POST', body: '{}' });
+          await waitForJob(job.job_id, 'Starting topology. The first run may build the Ubuntu base image.');
+          setStatus('Topology started. It is now running.');
+        } finally {
+          busyTopologyId = '';
+          busyTopologyAction = '';
+          await refreshSaved();
+        }
       }
 
       async function stopTopology(id) {
+        if (busyTopologyId) return;
+        busyTopologyId = id;
+        busyTopologyAction = 'Stopping topology';
         setStatus('Stopping topology...');
-        const job = await api(`api/topologies/${encodeURIComponent(id)}/stop`, { method: 'POST', body: '{}' });
-        await waitForJob(job.job_id, 'Stopping topology...');
-        setStatus('Topology stopped.');
         await refreshSaved();
+        try {
+          const job = await api(`api/topologies/${encodeURIComponent(id)}/stop`, { method: 'POST', body: '{}' });
+          await waitForJob(job.job_id, 'Stopping topology...');
+          setStatus('Topology stopped. It is no longer running.');
+        } finally {
+          busyTopologyId = '';
+          busyTopologyAction = '';
+          await refreshSaved();
+        }
       }
 
       async function generateHostData(networkIndex, hostIndex) {
@@ -1091,7 +1162,16 @@ INDEX_HTML = r"""<!doctype html>
               if (item.parent_router_id === router.id) item.parent_router_id = replacement;
             });
             model.networks.forEach((network) => {
-              if (network.router_id === router.id) network.router_id = replacement;
+              if ((network.router_ids || []).includes(router.id)) {
+                network.router_ids = network.router_ids.filter((routerId) => routerId !== router.id);
+                if (!network.router_ids.length) {
+                  network.router_ids = [replacement];
+                }
+              }
+              if (network.default_router_id === router.id) {
+                network.default_router_id = network.router_ids[0] || replacement;
+              }
+              network.router_id = network.default_router_id;
             });
             render();
           }
@@ -1245,6 +1325,14 @@ def validate_topology(topology):
             host['generate_data'] = bool(host.get('generate_data'))
             host['data_prompt'] = str(host.get('data_prompt') or '')
             host['data_content'] = str(host.get('data_content') or '')
+        legacy_router_id = network.get('router_id')
+        router_ids = network.get('router_ids')
+        if not isinstance(router_ids, list):
+          router_ids = []
+        if legacy_router_id:
+            router_ids = [legacy_router_id] + [router_id for router_id in router_ids if router_id != legacy_router_id]
+        network['router_ids'] = router_ids
+        network['default_router_id'] = network.get('default_router_id') or legacy_router_id or ''
 
     firewall = topology.setdefault('router', {}).setdefault('firewall', {})
     allowed = firewall.get('allowed') or []
@@ -1286,7 +1374,15 @@ def validate_topology(topology):
     topology['routers'] = normalized_routers
     router_ids = {item['id'] for item in normalized_routers}
     for network in networks:
-        network['router_id'] = network.get('router_id') if network.get('router_id') in router_ids else root_router_id
+        attached = [router_id for router_id in (network.get('router_ids') or []) if router_id in router_ids]
+        if not attached:
+            attached = [root_router_id]
+        default_router_id = network.get('default_router_id') if network.get('default_router_id') in router_ids else ''
+        if default_router_id not in attached:
+            default_router_id = attached[0]
+        network['router_ids'] = [default_router_id] + [router_id for router_id in dict.fromkeys(attached) if router_id != default_router_id]
+        network['default_router_id'] = network['router_ids'][0]
+        network['router_id'] = network['default_router_id']
     infrastructure = topology.setdefault('infrastructure', {})
     hackerlab_network_id = infrastructure.get('hackerlab_network_id')
     if not hackerlab_network_id or hackerlab_network_id not in seen_networks:
@@ -1358,10 +1454,9 @@ echo {shell_quote(username + ':' + password)} | chpasswd || true
 """
 
 
-def host_script(topology, network, host, host_index):
+def host_script(topology, network, host, host_index, gateway):
     role = HOST_TYPES[host['type']]['label']
     ip_addr = host_ip(network['cidr'], host_index)
-    gateway = router_ip(network['cidr'])
     data_content = host.get('data_content') or default_data_for_host(topology, network, host)
     service_block = role_service_block(host['type'])
     ssh_block = ''
@@ -1390,8 +1485,7 @@ def router_management_block(router):
     return ssh_setup_block(router.get('username') or 'admin', router.get('password') or 'strato')
 
 
-def hackerlab_script(network):
-    gateway = router_ip(network['cidr'])
+def hackerlab_script(network, gateway):
     return f"""set -eu
 ip route replace default via {gateway} || true
 exec /root/.start-container.sh
@@ -1432,6 +1526,18 @@ def transit_subnet(index):
     return f"10.250.{index}.0/30"
 
 
+def network_router_ips(network, router_ids):
+    assigned = list(dict.fromkeys(router_ids))
+    ip_map = {}
+    for offset, router_id in enumerate(assigned):
+        if offset == 0:
+            host_octet = 254
+        else:
+            host_octet = max(240, 254 - offset)
+        ip_map[router_id] = f"{subnet_prefix(network['cidr'])}.{host_octet}"
+    return ip_map
+
+
 def build_router_maps(topology):
     routers = topology.get('routers') or []
     by_id = {router['id']: router for router in routers}
@@ -1442,7 +1548,8 @@ def build_router_maps(topology):
             children[parent_id].append(router['id'])
     networks_by_router = {router['id']: [] for router in routers}
     for network in topology.get('networks', []):
-        networks_by_router.setdefault(network.get('router_id') or routers[0]['id'], []).append(network)
+        owner = network.get('default_router_id') or network.get('router_id') or routers[0]['id']
+        networks_by_router.setdefault(owner, []).append(network)
     return by_id, children, networks_by_router
 
 
@@ -1456,9 +1563,10 @@ def router_descendant_networks(router_id, children_map, networks_by_router):
 def router_script(topology, router, descendant_networks, child_routes, is_root):
     allowed_pairs = set(topology.get('router', {}).get('firewall', {}).get('allowed', []))
     forward_rules = []
-    for network in topology.get('networks', []):
-        if network.get('internet'):
-            forward_rules.append(f"ip saddr {network['cidr']} oifname \"$$wan_if\" accept")
+    if is_root:
+        for network in descendant_networks:
+            if network.get('internet'):
+                forward_rules.append(f"ip saddr {network['cidr']} oifname \"$$wan_if\" accept")
     for source in topology.get('networks', []):
         for dest in topology.get('networks', []):
             if source['id'] == dest['id']:
@@ -1521,6 +1629,8 @@ def generate_compose(topology):
     }
 
     # User-facing network bridges.
+    network_router_ip_maps = {}
+    router_network_attaches = {router['id']: [] for router in routers}
     for index, network in enumerate(topology['networks'], start=1):
         network_key = f'topo_{network["id"]}'
         compose['networks'][network_key] = {
@@ -1528,6 +1638,10 @@ def generate_compose(topology):
             'internal': True,
             'ipam': {'config': [{'subnet': network['cidr']}]},
         }
+        router_ids = network.get('router_ids') or [network.get('default_router_id') or root_router_id]
+        network_router_ip_maps[network['id']] = network_router_ips(network, router_ids)
+        for router_id in router_ids:
+            router_network_attaches.setdefault(router_id, []).append(network)
 
     transit_links = []
     child_routes = {router_id: [] for router_id in router_by_id}
@@ -1556,9 +1670,9 @@ def generate_compose(topology):
         router_id = router['id']
         service_name = f'router-{router_key(router_id)}'
         router_networks = {'playground-net': {}} if router_id == root_router_id else {}
-        for network in networks_by_router.get(router_id, []):
+        for network in router_network_attaches.get(router_id, []):
             network_key = f'topo_{network["id"]}'
-            router_networks[network_key] = {'ipv4_address': router_ip(network['cidr'])}
+            router_networks[network_key] = {'ipv4_address': network_router_ip_maps[network['id']].get(router_id, router_ip(network['cidr']))}
         for link in transit_links:
             if link['parent_id'] == router_id:
                 compose['networks'][link['key']] = {
@@ -1594,6 +1708,8 @@ def generate_compose(topology):
 
     for index, network in enumerate(topology['networks'], start=1):
         network_key = f'topo_{network["id"]}'
+        gateway_router_id = network.get('default_router_id') or network.get('router_ids', [root_router_id])[0]
+        gateway_ip = network_router_ip_maps[network['id']].get(gateway_router_id, router_ip(network['cidr']))
         for host_index, host in enumerate(network['hosts'], start=1):
             service_name = f'{network["id"]}-{host["id"]}'
             compose['services'][service_name] = {
@@ -1601,7 +1717,7 @@ def generate_compose(topology):
                 'container_name': f'{project_prefix}-{service_name}',
                 'hostname': host['name'],
                 'cap_add': ['NET_ADMIN'],
-                'command': ['sh', '-lc', host_script(topology, network, host, host_index)],
+                'command': ['sh', '-lc', host_script(topology, network, host, host_index, gateway_ip)],
                 'networks': {network_key: {'ipv4_address': host_ip(network['cidr'], host_index)}},
                 'labels': [
                     'scl.plugin=network-topology',
@@ -1616,7 +1732,7 @@ def generate_compose(topology):
                 'container_name': f'{project_prefix}-hackerlab',
                 'hostname': 'hackerlab',
                 'cap_add': ['NET_ADMIN'],
-                'command': ['sh', '-lc', hackerlab_script(network)],
+                'command': ['sh', '-lc', hackerlab_script(network, gateway_ip)],
                 'networks': {network_key: {'ipv4_address': hackerlab_ip(network['cidr'])}},
                 'labels': [
                     'scl.plugin=network-topology',
