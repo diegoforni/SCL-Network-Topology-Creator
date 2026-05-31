@@ -184,6 +184,24 @@ INDEX_HTML = r"""<!doctype html>
       }
       .network {
         background: #f8fbff;
+        position: relative;
+        box-shadow: inset 4px 0 0 #2563eb;
+      }
+      .network::before {
+        content: 'Network';
+        display: inline-flex;
+        align-items: center;
+        height: 24px;
+        margin: -12px -12px 12px;
+        padding: 0 12px;
+        background: linear-gradient(90deg, #dbeafe, #eff6ff);
+        border-bottom: 1px solid #cfe0fb;
+        border-radius: 8px 8px 0 0;
+        color: #1e40af;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: uppercase;
       }
       .network-head {
         display: flex;
@@ -191,11 +209,15 @@ INDEX_HTML = r"""<!doctype html>
         align-items: center;
         gap: 12px;
         margin-bottom: 10px;
+        padding-top: 2px;
+      }
+      .network-head h3 {
+        margin: 0;
       }
       .network-body {
-        border-top: 1px dashed #d9e2ee;
-        margin-top: 12px;
-        padding-top: 12px;
+        border-top: 1px dashed #cfdced;
+        margin-top: 14px;
+        padding-top: 14px;
       }
       .host-list {
         display: grid;
@@ -269,10 +291,35 @@ INDEX_HTML = r"""<!doctype html>
         stroke: #9aa7b8;
         stroke-dasharray: 7 6;
       }
+      .router-link {
+        stroke: #94a3b8;
+        stroke-width: 2;
+        fill: none;
+      }
+      .network-link {
+        stroke-width: 2.5;
+        fill: none;
+        opacity: 0.95;
+      }
+      .network-link.default {
+        stroke: #2563eb;
+      }
+      .network-link.attached {
+        stroke: #cbd5e1;
+        stroke-dasharray: 6 5;
+      }
       .graph-node circle {
         stroke: var(--accent);
         stroke-width: 2;
         fill: white;
+      }
+      .graph-node.router-node rect {
+        stroke: #475569;
+        stroke-width: 2;
+        fill: #f8fafc;
+      }
+      .graph-node.network-node circle {
+        fill: #ffffff;
       }
       .graph-node text {
         font-size: 13px;
@@ -806,44 +853,148 @@ INDEX_HTML = r"""<!doctype html>
         `;
       }
 
-      function networkGraphLayout(networks, width = 900, height = 420) {
-        const cx = width / 2;
-        const cy = height / 2;
-        const radius = Math.max(120, Math.min(width, height) * 0.33);
-        return networks.map((network, index) => {
-          const angle = (-Math.PI / 2) + (2 * Math.PI * index / Math.max(networks.length, 1));
-          const x = cx + radius * Math.cos(angle);
-          const y = cy + radius * Math.sin(angle);
-          return { ...network, x, y, angle };
+      function buildRouterDepthMap(routers) {
+        const byId = new Map(routers.map((router) => [router.id, router]));
+        const depthMap = new Map();
+        const visiting = new Set();
+        function depth(routerId) {
+          if (depthMap.has(routerId)) return depthMap.get(routerId);
+          if (visiting.has(routerId)) return 0;
+          visiting.add(routerId);
+          const router = byId.get(routerId);
+          let value = 0;
+          if (router && router.parent_router_id && router.parent_router_id !== router.id && byId.has(router.parent_router_id)) {
+            value = depth(router.parent_router_id) + 1;
+          }
+          visiting.delete(routerId);
+          depthMap.set(routerId, value);
+          return value;
+        }
+        routers.forEach((router) => depth(router.id));
+        return depthMap;
+      }
+
+      function topologyGraphLayout(routers, networks, width = 900, height = 500) {
+        const depthMap = buildRouterDepthMap(routers);
+        const routerLevels = [];
+        for (const router of routers) {
+          const depth = depthMap.get(router.id) || 0;
+          routerLevels[depth] = routerLevels[depth] || [];
+          routerLevels[depth].push(router);
+        }
+        const routerPositions = {};
+        const topMargin = 70;
+        const levelGap = routerLevels.length > 1 ? Math.min(110, Math.max(70, 180 / (routerLevels.length - 1))) : 0;
+        routerLevels.forEach((levelRouters, depth) => {
+          if (!levelRouters || !levelRouters.length) return;
+          const y = topMargin + depth * levelGap;
+          const span = width - 120;
+          levelRouters.forEach((router, index) => {
+            const x = levelRouters.length === 1 ? width / 2 : 60 + (span * index / (levelRouters.length - 1));
+            routerPositions[router.id] = { ...router, x, y, depth };
+          });
         });
+        const networkPositions = {};
+        const buckets = new Map();
+        networks.forEach((network) => {
+          const owner = network.default_router_id || network.router_ids?.[0] || routers[0]?.id || '';
+          if (!buckets.has(owner)) buckets.set(owner, []);
+          buckets.get(owner).push(network);
+        });
+        const baseY = Math.min(height - 95, topMargin + Math.max(routerLevels.length - 1, 1) * levelGap + 170);
+        let row = 0;
+        buckets.forEach((bucket, owner) => {
+          const ownerPos = routerPositions[owner] || { x: width / 2 };
+          const spread = Math.min(220, 70 + bucket.length * 35);
+          bucket.forEach((network, index) => {
+            const offset = bucket.length === 1 ? 0 : (index - (bucket.length - 1) / 2) * (spread / Math.max(bucket.length - 1, 1));
+            networkPositions[network.id] = {
+              ...network,
+              x: Math.max(70, Math.min(width - 70, ownerPos.x + offset)),
+              y: baseY + row * 44
+            };
+          });
+          row += 1;
+        });
+        networks.forEach((network, index) => {
+          if (networkPositions[network.id]) return;
+          networkPositions[network.id] = {
+            ...network,
+            x: 110 + ((index * 190) % Math.max(width - 220, 1)),
+            y: baseY + (row + Math.floor(index / 4)) * 44
+          };
+        });
+        return { routerPositions, networkPositions, baseY, levelGap };
       }
 
       function firewallGraphTemplate() {
+        const routers = model.routers || [];
         const networks = model.networks || [];
         const allowed = new Set(model.router.firewall.allowed || []);
-        const nodes = networkGraphLayout(networks);
-        const edgeParts = [];
-        for (const source of nodes) {
-          for (const target of nodes) {
+        const { routerPositions, networkPositions } = topologyGraphLayout(routers, networks);
+        const parts = [];
+
+        for (const router of routers) {
+          const pos = routerPositions[router.id];
+          if (!pos) continue;
+          const parent = router.parent_router_id ? routerPositions[router.parent_router_id] : null;
+          if (parent) {
+            parts.push(`
+              <line
+                class="router-link"
+                x1="${parent.x.toFixed(1)}"
+                y1="${(parent.y + 24).toFixed(1)}"
+                x2="${pos.x.toFixed(1)}"
+                y2="${(pos.y - 24).toFixed(1)}"
+              ></line>
+            `);
+          }
+        }
+
+        for (const network of networks) {
+          const networkPos = networkPositions[network.id];
+          if (!networkPos) continue;
+          const attached = Array.from(new Set(network.router_ids || [network.default_router_id || ''])).filter(Boolean);
+          attached.forEach((routerId) => {
+            const routerPos = routerPositions[routerId];
+            if (!routerPos) return;
+            const isDefault = routerId === network.default_router_id;
+            parts.push(`
+              <line
+                class="network-link ${isDefault ? 'default' : 'attached'}"
+                x1="${routerPos.x.toFixed(1)}"
+                y1="${(routerPos.y + 24).toFixed(1)}"
+                x2="${networkPos.x.toFixed(1)}"
+                y2="${(networkPos.y - 28).toFixed(1)}"
+              ></line>
+            `);
+          });
+        }
+
+        for (const source of networks) {
+          for (const target of networks) {
             if (source.id === target.id) continue;
+            const sourcePos = networkPositions[source.id];
+            const targetPos = networkPositions[target.id];
+            if (!sourcePos || !targetPos) continue;
             const key = `${source.id}->${target.id}`;
-            const dx = target.x - source.x;
-            const dy = target.y - source.y;
-            const midX = (source.x + target.x) / 2;
-            const midY = (source.y + target.y) / 2;
+            const dx = targetPos.x - sourcePos.x;
+            const dy = targetPos.y - sourcePos.y;
+            const midX = (sourcePos.x + targetPos.x) / 2;
+            const midY = (sourcePos.y + targetPos.y) / 2;
             const length = Math.max(Math.hypot(dx, dy), 1);
-            const offset = ((source.id < target.id) ? 1 : -1) * Math.min(60, 14 + (length * 0.1));
+            const offset = ((source.id < target.id) ? 1 : -1) * Math.min(70, 18 + (length * 0.08));
             const perpX = (-dy / length) * offset;
             const perpY = (dx / length) * offset;
             const cx = midX + perpX;
             const cy = midY + perpY;
             const isAllowed = allowed.has(key);
-            edgeParts.push(`
+            parts.push(`
               <path
                 class="graph-edge ${isAllowed ? 'allowed' : 'blocked'}"
                 data-action="toggle-firewall"
                 data-firewall="${key}"
-                d="M ${source.x.toFixed(1)} ${source.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${target.x.toFixed(1)} ${target.y.toFixed(1)}"
+                d="M ${sourcePos.x.toFixed(1)} ${sourcePos.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${targetPos.x.toFixed(1)} ${targetPos.y.toFixed(1)}"
                 marker-end="url(#fwArrow)"
                 aria-label="${escapeHtml(source.name)} to ${escapeHtml(target.name)}"
               >
@@ -852,27 +1003,50 @@ INDEX_HTML = r"""<!doctype html>
             `);
           }
         }
-        const nodeParts = nodes.map((node) => {
-          const secondary = `${node.hosts.length} host${node.hosts.length === 1 ? '' : 's'}`;
+
+        const routerParts = routers.map((router) => {
+          const pos = routerPositions[router.id];
+          if (!pos) return '';
+          const children = routers.filter((item) => item.parent_router_id === router.id).length;
+          const attachedNetworks = networks.filter((network) => (network.router_ids || []).includes(router.id)).length;
           return `
-            <g class="graph-node" transform="translate(${node.x.toFixed(1)} ${node.y.toFixed(1)})">
-              <circle r="28"></circle>
-              <text y="-2">${escapeHtml(node.name)}</text>
-              <text class="subtext" y="14">${escapeHtml(secondary)}</text>
+            <g class="graph-node router-node" transform="translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})">
+              <rect x="-34" y="-26" width="68" height="52" rx="10"></rect>
+              <text y="-3">${escapeHtml(router.name || router.id)}</text>
+              <text class="subtext" y="14">${escapeHtml(`${attachedNetworks} nets, ${children} child${children === 1 ? '' : 'ren'}`)}</text>
             </g>
           `;
         }).join('');
-        const statusText = networks.length ? `Networks: ${networks.length}` : 'No networks';
+
+        const networkParts = networks.map((network) => {
+          const pos = networkPositions[network.id];
+          if (!pos) return '';
+          const attached = Array.from(new Set(network.router_ids || [network.default_router_id || ''])).filter(Boolean);
+          const routersText = attached.map((routerId) => (routerPositions[routerId]?.name || routerId)).join(' · ');
+          const labels = `${network.hosts.length} host${network.hosts.length === 1 ? '' : 's'}`;
+          return `
+            <g class="graph-node network-node" transform="translate(${pos.x.toFixed(1)} ${pos.y.toFixed(1)})">
+              <circle r="28"></circle>
+              <text y="-2">${escapeHtml(network.name)}</text>
+              <text class="subtext" y="14">${escapeHtml(labels)}</text>
+              <title>${escapeHtml(network.name)}${routersText ? ` via ${routersText}` : ''}</title>
+            </g>
+          `;
+        }).join('');
+
+        const statusText = `${routers.length} router${routers.length === 1 ? '' : 's'}, ${networks.length} network${networks.length === 1 ? '' : 's'}`;
         return `
-          <svg class="graph-canvas" viewBox="0 0 900 420" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Firewall topology graph">
+          <svg class="graph-canvas" viewBox="0 0 900 500" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Network and router topology graph">
             <defs>
               <marker id="fwArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
                 <path d="M0,0 L8,4 L0,8 z" fill="#1167b1"></path>
               </marker>
             </defs>
             <text x="20" y="28" fill="#5d6978" font-size="13">${escapeHtml(statusText)}</text>
-            ${edgeParts.join('')}
-            ${nodeParts}
+            <text x="20" y="48" fill="#5d6978" font-size="12">Blue lines connect routers and networks. Click network-to-network links to edit firewall rules.</text>
+            ${parts.join('')}
+            ${routerParts}
+            ${networkParts}
           </svg>
         `;
       }
