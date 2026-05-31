@@ -888,7 +888,7 @@ INDEX_HTML = r"""<!doctype html>
         return depthMap;
       }
 
-      function topologyGraphLayout(routers, networks, width = 900, height = 500) {
+      function topologyGraphLayout(routers, networks, width = 900, height = 560) {
         const depthMap = buildRouterDepthMap(routers);
         const routerLevels = [];
         for (const router of routers) {
@@ -909,35 +909,46 @@ INDEX_HTML = r"""<!doctype html>
           });
         });
         const networkPositions = {};
+        const groupMap = new Map();
         networks.forEach((network) => {
           const attached = Array.from(new Set(network.router_ids || [network.default_router_id || routers[0]?.id || ''])).filter(Boolean);
-          const anchors = attached.map((routerId) => routerPositions[routerId]).filter(Boolean);
-          const fallbackRouter = routerPositions[network.default_router_id || attached[0] || routers[0]?.id || ''];
-          const x = anchors.length ? anchors.reduce((sum, item) => sum + item.x, 0) / anchors.length : (fallbackRouter?.x || width / 2);
-          const anchorDepth = anchors.length ? Math.max(...anchors.map((item) => item.depth || 0)) : (fallbackRouter?.depth || 0);
-          const y = Math.min(height - 70, topMargin + (anchorDepth + 1) * (levelGap || 110) + 72);
-          networkPositions[network.id] = {
-            ...network,
-            x: Math.max(70, Math.min(width - 70, x)),
-            y
-          };
+          const signature = attached.slice().sort().join('|') || 'unattached';
+          if (!groupMap.has(signature)) {
+            const anchors = attached.map((routerId) => routerPositions[routerId]).filter(Boolean);
+            const fallbackRouter = routerPositions[network.default_router_id || attached[0] || routers[0]?.id || ''];
+            const anchorX = anchors.length ? anchors.reduce((sum, item) => sum + item.x, 0) / anchors.length : (fallbackRouter?.x || width / 2);
+            const anchorDepth = anchors.length ? Math.max(...anchors.map((item) => item.depth || 0)) : (fallbackRouter?.depth || 0);
+            groupMap.set(signature, {
+              attached,
+              anchorX: Math.max(70, Math.min(width - 70, anchorX)),
+              baseY: topMargin + (anchorDepth + 1) * (levelGap || 110) + 80,
+              networks: []
+            });
+          }
+          groupMap.get(signature).networks.push(network);
         });
-        networks.forEach((network, index) => {
-          if (networkPositions[network.id]) return;
-          networkPositions[network.id] = {
-            ...network,
-            x: 110 + ((index * 190) % Math.max(width - 220, 1)),
-            y: Math.min(height - 70, topMargin + Math.max(routerLevels.length, 1) * (levelGap || 110) + 72 + Math.floor(index / 4) * 44)
-          };
+        let nextY = topMargin + Math.max(routerLevels.length, 1) * (levelGap || 110) + 80;
+        const groups = Array.from(groupMap.values()).sort((a, b) => a.baseY - b.baseY || a.anchorX - b.anchorX);
+        groups.forEach((group) => {
+          const gap = group.networks.length > 1 ? 72 : 0;
+          const groupY = Math.max(group.baseY, nextY);
+          group.networks.forEach((network, index) => {
+            networkPositions[network.id] = {
+              ...network,
+              x: group.anchorX,
+              y: groupY + index * gap
+            };
+          });
+          nextY = groupY + Math.max(group.networks.length - 1, 0) * gap + 98;
         });
-        return { routerPositions, networkPositions };
+        return { routerPositions, networkPositions, canvasHeight: Math.max(height, nextY + 40) };
       }
 
       function firewallGraphTemplate() {
         const routers = model.routers || [];
         const networks = model.networks || [];
         const allowed = new Set(model.router.firewall.allowed || []);
-        const { routerPositions, networkPositions } = topologyGraphLayout(routers, networks);
+        const { routerPositions, networkPositions, canvasHeight } = topologyGraphLayout(routers, networks);
         const parts = [];
 
         for (const router of routers) {
@@ -1042,7 +1053,7 @@ INDEX_HTML = r"""<!doctype html>
 
         const statusText = `${routers.length} router${routers.length === 1 ? '' : 's'}, ${networks.length} network${networks.length === 1 ? '' : 's'}`;
         return `
-          <svg class="graph-canvas" viewBox="0 0 900 500" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Network and router topology graph">
+          <svg class="graph-canvas" viewBox="0 0 900 ${canvasHeight}" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Network and router topology graph">
             <defs>
               <marker id="fwArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
                 <path d="M0,0 L8,4 L0,8 z" fill="#1167b1"></path>
