@@ -1035,8 +1035,8 @@ INDEX_HTML = r"""<!doctype html>
           });
         }
 
-        for (const source of networks) {
-          for (const target of networks) {
+        for (const [sourceIndex, source] of networks.entries()) {
+          for (const [targetIndex, target] of networks.entries()) {
             if (source.id === target.id) continue;
             const sourcePos = networkPositions[source.id];
             const targetPos = networkPositions[target.id];
@@ -1047,7 +1047,9 @@ INDEX_HTML = r"""<!doctype html>
             const midX = (sourcePos.x + targetPos.x) / 2;
             const midY = (sourcePos.y + targetPos.y) / 2;
             const length = Math.max(Math.hypot(dx, dy), 1);
-            const offset = ((source.id < target.id) ? 1 : -1) * Math.min(70, 18 + (length * 0.08));
+            const direction = sourceIndex < targetIndex ? 1 : -1;
+            const pairGap = 34 + (Math.abs(sourceIndex - targetIndex) * 10);
+            const offset = direction * Math.min(120, pairGap + (length * 0.12));
             const perpX = (-dy / length) * offset;
             const perpY = (dx / length) * offset;
             const cx = midX + perpX;
@@ -1067,8 +1069,8 @@ INDEX_HTML = r"""<!doctype html>
                 </path>
                 <text
                   class="graph-edge-label ${isAllowed ? 'allowed' : 'blocked'}"
-                  x="${cx.toFixed(1)}"
-                  y="${(cy - 6).toFixed(1)}"
+                  x="${(cx + ((direction > 0 ? 1 : -1) * 4)).toFixed(1)}"
+                  y="${(cy - 8).toFixed(1)}"
                 >${escapeHtml(`${source.name} → ${target.name}`)}</text>
               </g>
             `);
