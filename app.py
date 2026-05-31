@@ -280,12 +280,13 @@ INDEX_HTML = r"""<!doctype html>
         border-radius: 8px;
         background: #f8fbff;
         padding: 10px;
-        overflow: hidden;
+        overflow: auto;
       }
       .graph-canvas {
         width: 100%;
         height: auto;
         min-height: 420px;
+        min-width: 900px;
         display: block;
       }
       .graph-edge {
@@ -300,6 +301,20 @@ INDEX_HTML = r"""<!doctype html>
       .graph-edge.blocked {
         stroke: #9aa7b8;
         stroke-dasharray: 7 6;
+      }
+      .graph-edge-label {
+        font-size: 11px;
+        font-weight: 700;
+        text-anchor: middle;
+        paint-order: stroke;
+        stroke: rgba(248, 251, 255, 0.95);
+        stroke-width: 4px;
+      }
+      .graph-edge-label.allowed {
+        fill: #18794e;
+      }
+      .graph-edge-label.blocked {
+        fill: #7b8794;
       }
       .router-link {
         stroke: #94a3b8;
@@ -317,6 +332,45 @@ INDEX_HTML = r"""<!doctype html>
       .network-link.attached {
         stroke: #cbd5e1;
         stroke-dasharray: 6 5;
+      }
+      .graph-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        align-items: center;
+      }
+      .legend-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: white;
+        color: var(--muted);
+        padding: 4px 12px;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      .legend-line {
+        width: 28px;
+        height: 0;
+        border-top: 3px solid currentColor;
+        display: inline-block;
+      }
+      .legend-line.dashed {
+        border-top-style: dashed;
+      }
+      .legend-line.router {
+        color: #94a3b8;
+      }
+      .legend-line.network {
+        color: #2563eb;
+      }
+      .legend-line.allowed {
+        color: #18794e;
+      }
+      .legend-line.blocked {
+        color: #9aa7b8;
       }
       .graph-node circle {
         stroke: var(--accent);
@@ -481,9 +535,10 @@ INDEX_HTML = r"""<!doctype html>
           <h2>Firewall</h2>
           <p class="muted">Allowed paths are directional. Return traffic for established connections is automatically allowed.</p>
           <div class="graph-legend">
-            <span class="pill ok">Allowed link</span>
-            <span class="pill">Blocked link</span>
-            <span class="pill">Click a link to toggle</span>
+            <span class="legend-item"><span class="legend-line router"></span>Router link</span>
+            <span class="legend-item"><span class="legend-line network"></span>Network attachment</span>
+            <span class="legend-item"><span class="legend-line allowed"></span>Firewall A → B allowed</span>
+            <span class="legend-item"><span class="legend-line blocked dashed"></span>Firewall A → B blocked</span>
           </div>
           <div id="firewallGraph" class="firewall-graph"></div>
           <div class="status" id="status"></div>
@@ -889,25 +944,15 @@ INDEX_HTML = r"""<!doctype html>
       }
 
       function topologyGraphLayout(routers, networks, width = 900, height = 560) {
-        const depthMap = buildRouterDepthMap(routers);
-        const routerLevels = [];
-        for (const router of routers) {
-          const depth = depthMap.get(router.id) || 0;
-          routerLevels[depth] = routerLevels[depth] || [];
-          routerLevels[depth].push(router);
-        }
         const routerPositions = {};
-        const topMargin = 70;
-        const levelGap = routerLevels.length > 1 ? Math.min(110, Math.max(70, 180 / (routerLevels.length - 1))) : 0;
-        routerLevels.forEach((levelRouters, depth) => {
-          if (!levelRouters || !levelRouters.length) return;
-          const y = topMargin + depth * levelGap;
-          const span = width - 120;
-          levelRouters.forEach((router, index) => {
-            const x = levelRouters.length === 1 ? width / 2 : 60 + (span * index / (levelRouters.length - 1));
-            routerPositions[router.id] = { ...router, x, y, depth };
-          });
+        const routerY = 115;
+        const routerSpan = width - 120;
+        const orderedRouters = routers.slice();
+        orderedRouters.forEach((router, index) => {
+          const x = orderedRouters.length === 1 ? width / 2 : 60 + (routerSpan * index / (orderedRouters.length - 1));
+          routerPositions[router.id] = { ...router, x, y: routerY, order: index };
         });
+
         const networkPositions = {};
         const groupMap = new Map();
         networks.forEach((network) => {
@@ -917,31 +962,43 @@ INDEX_HTML = r"""<!doctype html>
             const anchors = attached.map((routerId) => routerPositions[routerId]).filter(Boolean);
             const fallbackRouter = routerPositions[network.default_router_id || attached[0] || routers[0]?.id || ''];
             const anchorX = anchors.length ? anchors.reduce((sum, item) => sum + item.x, 0) / anchors.length : (fallbackRouter?.x || width / 2);
-            const anchorDepth = anchors.length ? Math.max(...anchors.map((item) => item.depth || 0)) : (fallbackRouter?.depth || 0);
             groupMap.set(signature, {
               attached,
-              anchorX: Math.max(70, Math.min(width - 70, anchorX)),
-              baseY: topMargin + (anchorDepth + 1) * (levelGap || 110) + 80,
+              anchorX: Math.max(80, Math.min(width - 80, anchorX)),
               networks: []
             });
           }
           groupMap.get(signature).networks.push(network);
         });
-        let nextY = topMargin + Math.max(routerLevels.length, 1) * (levelGap || 110) + 80;
-        const groups = Array.from(groupMap.values()).sort((a, b) => a.baseY - b.baseY || a.anchorX - b.anchorX);
-        groups.forEach((group) => {
-          const gap = group.networks.length > 1 ? 72 : 0;
-          const groupY = Math.max(group.baseY, nextY);
+
+        const groups = Array.from(groupMap.values()).sort((a, b) => a.anchorX - b.anchorX);
+        const networkBaseY = 360;
+        const rowGap = 96;
+        groups.forEach((group, rowIndex) => {
+          const rowY = networkBaseY + rowIndex * rowGap;
+          const count = group.networks.length;
+          const spread = Math.min(220, Math.max(120, (count - 1) * 120));
           group.networks.forEach((network, index) => {
+            const x = count === 1 ? group.anchorX : group.anchorX + ((index - (count - 1) / 2) * (spread / Math.max(count - 1, 1)));
             networkPositions[network.id] = {
               ...network,
-              x: group.anchorX,
-              y: groupY + index * gap
+              x: Math.max(80, Math.min(width - 80, x)),
+              y: rowY
             };
           });
-          nextY = groupY + Math.max(group.networks.length - 1, 0) * gap + 98;
         });
-        return { routerPositions, networkPositions, canvasHeight: Math.max(height, nextY + 40) };
+
+        networks.forEach((network, index) => {
+          if (networkPositions[network.id]) return;
+          networkPositions[network.id] = {
+            ...network,
+            x: 100 + ((index * 180) % Math.max(width - 200, 1)),
+            y: networkBaseY + Math.floor(index / 4) * rowGap
+          };
+        });
+
+        const canvasHeight = Math.max(height, networkBaseY + Math.max(groups.length, 1) * rowGap + 80);
+        return { routerPositions, networkPositions, canvasHeight };
       }
 
       function firewallGraphTemplate() {
@@ -1007,16 +1064,23 @@ INDEX_HTML = r"""<!doctype html>
             const cy = midY + perpY;
             const isAllowed = allowed.has(key);
             parts.push(`
-              <path
-                class="graph-edge ${isAllowed ? 'allowed' : 'blocked'}"
-                data-action="toggle-firewall"
-                data-firewall="${key}"
-                d="M ${sourcePos.x.toFixed(1)} ${sourcePos.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${targetPos.x.toFixed(1)} ${targetPos.y.toFixed(1)}"
-                marker-end="url(#fwArrow)"
-                aria-label="${escapeHtml(source.name)} to ${escapeHtml(target.name)}"
-              >
-                <title>${escapeHtml(source.name)} -> ${escapeHtml(target.name)}${isAllowed ? ' allowed' : ' blocked'}</title>
-              </path>
+              <g>
+                <path
+                  class="graph-edge ${isAllowed ? 'allowed' : 'blocked'}"
+                  data-action="toggle-firewall"
+                  data-firewall="${key}"
+                  d="M ${sourcePos.x.toFixed(1)} ${sourcePos.y.toFixed(1)} Q ${cx.toFixed(1)} ${cy.toFixed(1)} ${targetPos.x.toFixed(1)} ${targetPos.y.toFixed(1)}"
+                  marker-end="url(#fwArrow)"
+                  aria-label="${escapeHtml(source.name)} to ${escapeHtml(target.name)}"
+                >
+                  <title>${escapeHtml(source.name)} -> ${escapeHtml(target.name)}${isAllowed ? ' allowed' : ' blocked'}</title>
+                </path>
+                <text
+                  class="graph-edge-label ${isAllowed ? 'allowed' : 'blocked'}"
+                  x="${cx.toFixed(1)}"
+                  y="${(cy - 6).toFixed(1)}"
+                >${escapeHtml(`${source.name} → ${target.name}`)}</text>
+              </g>
             `);
           }
         }
