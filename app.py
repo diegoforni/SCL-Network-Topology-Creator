@@ -2115,7 +2115,25 @@ def topology_network_name(topology_id, network_id):
 
 
 def hackerlab_container_name(topology_id):
-    return f'{compose_project_name(topology_id)}-hackerlab'
+    return 'scl-hackerlab'
+
+
+def resolve_topology_network_name(topology_id, network_id):
+    expected_suffix = f'-{network_id}'
+    expected_tokens = {
+        topology_id.lower(),
+        compose_project_name(topology_id).lower(),
+        topology_id,
+    }
+    try:
+        output = docker_run(['network', 'ls', '--format', '{{.Name}}'])
+    except Exception:
+        return topology_network_name(topology_id, network_id)
+    for name in output.splitlines():
+        lowered = name.lower()
+        if lowered.endswith(expected_suffix) and any(token.lower() in lowered for token in expected_tokens):
+            return name
+    return topology_network_name(topology_id, network_id)
 
 
 def run_compose(topology_id, args):
@@ -2167,7 +2185,7 @@ def sync_hackerlab_runtime(topology):
     if not selected_network:
         return {'status': 'skipped'}
     container_name = hackerlab_container_name(topology['id'])
-    selected_network_name = topology_network_name(topology['id'], selected_network['id'])
+    selected_network_name = resolve_topology_network_name(topology['id'], selected_network['id'])
     router_ids = selected_network.get('router_ids') or [selected_network.get('default_router_id') or '']
     router_ids = [router_id for router_id in dict.fromkeys(router_ids) if router_id]
     if not router_ids:
@@ -2180,7 +2198,7 @@ def sync_hackerlab_runtime(topology):
         current_networks = docker_inspect_json(['inspect', '-f', '{{json .NetworkSettings.Networks}}', container_name]) or {}
     except Exception:
         return {'status': 'missing'}
-    attached_network_names = [name for name in current_networks.keys() if name.startswith(compose_project_name(topology['id'])) and name != 'playground-net']
+    attached_network_names = [name for name in current_networks.keys() if topology['id'].lower() in name.lower() and name != 'playground-net']
     for network_name in attached_network_names:
         if network_name != selected_network_name:
             try:
