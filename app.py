@@ -81,21 +81,25 @@ INDEX_HTML = r"""<!doctype html>
       }
       * { box-sizing: border-box; }
       html, body {
-        min-height: 100%;
+        height: 100%;
       }
       body {
         margin: 0;
         background: var(--bg);
         color: var(--ink);
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        min-height: 100vh;
+        height: 100vh;
+        overflow: hidden;
       }
       main {
         width: 100%;
         max-width: none;
         margin: 0 auto;
         padding: 18px 20px 22px;
-        min-height: 100vh;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
       }
       header {
         display: flex;
@@ -156,7 +160,8 @@ INDEX_HTML = r"""<!doctype html>
         grid-template-columns: minmax(0, 1fr) minmax(420px, 0.78fr);
         gap: 18px;
         align-items: stretch;
-        min-height: calc(100vh - 120px);
+        flex: 1 1 auto;
+        min-height: 0;
       }
       .panel {
         background: var(--panel);
@@ -164,7 +169,8 @@ INDEX_HTML = r"""<!doctype html>
         border-radius: 8px;
         padding: 16px;
         min-width: 0;
-        min-height: 100%;
+        min-height: 0;
+        overflow: auto;
       }
       .row {
         display: grid;
@@ -512,9 +518,20 @@ INDEX_HTML = r"""<!doctype html>
         background: #eef6ff;
       }
       @media (max-width: 920px) {
+        body {
+          overflow: auto;
+        }
+        main {
+          height: auto;
+          min-height: 100vh;
+        }
         .grid {
           grid-template-columns: 1fr;
+          flex: 0 0 auto;
           min-height: auto;
+        }
+        .panel {
+          overflow: visible;
         }
         .span-2, .span-3, .span-4, .span-5, .span-6, .span-8 { grid-column: span 12; }
       }
@@ -618,6 +635,44 @@ INDEX_HTML = r"""<!doctype html>
       </div>
     </main>
     <script>
+      function fitHostIframe() {
+        try {
+          const frame = window.frameElement;
+          if (!frame || !window.parent) return;
+          const rect = frame.getBoundingClientRect();
+          const parentHeight = window.parent.innerHeight || document.documentElement.clientHeight;
+          const height = Math.max(560, Math.floor(parentHeight - rect.top - 6));
+          const heightPx = `${height}px`;
+          frame.style.setProperty('height', heightPx, 'important');
+          frame.style.setProperty('min-height', heightPx, 'important');
+          frame.style.setProperty('width', '100%', 'important');
+
+          const cardBody = frame.closest('.card-body');
+          const card = frame.closest('.card');
+          if (cardBody) {
+            cardBody.style.setProperty('height', heightPx, 'important');
+            cardBody.style.setProperty('min-height', heightPx, 'important');
+            cardBody.style.setProperty('overflow', 'hidden', 'important');
+          }
+          if (card) {
+            const cardRect = card.getBoundingClientRect();
+            const cardHeight = Math.max(620, Math.floor(parentHeight - cardRect.top - 6));
+            card.style.setProperty('height', `${cardHeight}px`, 'important');
+            card.style.setProperty('min-height', `${cardHeight}px`, 'important');
+            card.style.setProperty('display', 'flex', 'important');
+            card.style.setProperty('flex-direction', 'column', 'important');
+          }
+        } catch (error) {
+          // Cross-origin hosts cannot be resized from inside the iframe.
+        }
+      }
+      fitHostIframe();
+      window.addEventListener('resize', fitHostIframe);
+      window.addEventListener('load', fitHostIframe);
+      setTimeout(fitHostIframe, 100);
+      setTimeout(fitHostIframe, 500);
+      setTimeout(fitHostIframe, 1200);
+
       const HOST_TYPES = __HOST_TYPES__;
       const networksEl = document.getElementById('networks');
       const firewallGraphEl = document.getElementById('firewallGraph');
