@@ -6,11 +6,21 @@ services:
     build: .
     container_name: scl-plugin-network-topology-control-plane
     stop_signal: SIGINT
+    ports:
+      - "9002:9002"
+    env_file:
+      - ../../Trident_new/.env
     environment:
       - DASHBOARD_LLM_URL=http://dashboard/api/llm/chat
+      - AGENTS_HOST_PATH=/home/diego/SCLT/SCL-Network-Topology-Creator/agents
+      - OPENCODE_API_KEY=YOUR_OPENCODE_API_KEY_HERE
+      - LLM_URL=http://host.docker.internal:8080/p/diego/v1
+      - LLM_MODEL=qwen3-coder
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - network-topology-data:/app/data
+      - ./agents:/app/agents:ro
+      - ./agents:/agent-scripts:ro
     networks:
       - playground-net
 
