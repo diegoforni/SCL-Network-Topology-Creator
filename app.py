@@ -25,13 +25,34 @@ if ENV_FILE.exists():
                 os.environ[key.strip()] = value.strip()
 
 # Add agents directory to sys.path for importing generate_opencode_config
-AGENTS_DIR = Path(__file__).parent / 'agents'
-if str(AGENTS_DIR) not in sys.path:
+# The opencode_config.py is in the images directory
+# Try multiple possible paths with environment variable override
+AGENTS_DIR = None
+possible_paths = [
+    Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-plugin-network-topology-ubuntu',
+    Path('/app/images/scl-plugin-network-topology-ubuntu'),
+    Path(__file__).parent.parent / 'images' / 'scl-plugin-network-topology-ubuntu'
+]
+
+# Add local development path if running locally
+local_path = Path(__file__).parent.parent.parent / 'images' / 'scl-plugin-network-topology-ubuntu'
+if local_path.exists():
+    possible_paths.insert(0, local_path)
+
+for possible_path in possible_paths:
+    if possible_path.exists() and (possible_path / 'opencode_config.py').exists():
+        AGENTS_DIR = possible_path
+        break
+
+if AGENTS_DIR and str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
+    print(f"📂 Added {AGENTS_DIR} to sys.path for opencode_config import")
 
 try:
     from opencode_config import generate_opencode_config, AGENT_TEMPLATES
-except ImportError:
+    print(f"✅ Successfully imported opencode_config: generate_opencode_config={generate_opencode_config is not None}")
+except ImportError as e:
+    print(f"⚠️ Failed to import opencode_config: {e}")
     generate_opencode_config = None
     AGENT_TEMPLATES = {}
 
@@ -41,6 +62,7 @@ DATA_DIR = Path(os.environ.get('TOPOLOGY_DATA_DIR', '/app/data'))
 TOPOLOGIES_DIR = DATA_DIR / 'topologies'
 BASE_IMAGE = 'scl-plugin-network-topology-ubuntu:0.1'
 OPENCODE_IMAGE = 'scl-plugin-network-topology-ubuntu-opencode:0.1'
+SLIPS_IMAGE = 'scl-slips-sensor:0.1'
 
 # Map of base OS images to their OpenCode-enabled variants
 # Built dynamically by ensure_opencode_images()
@@ -48,7 +70,7 @@ OPENCODE_IMAGES_CACHE = {}
 LLM_URL = os.environ.get('DASHBOARD_LLM_URL', 'http://dashboard/api/llm/chat')
 OPENCODE_API_KEY = os.environ.get('OPENCODE_API_KEY', '')
 LLM_URL_FULL = os.environ.get('LLM_URL', 'https://llm.ai.e-infra.cz/v1')
-LLM_MODEL = os.environ.get('LLM_MODEL', 'qwen3-coder')
+LLM_MODEL = os.environ.get('LLM_MODEL', 'gemma4')
 AGENTS_HOST_PATH = os.environ.get('AGENTS_HOST_PATH', '/agent-scripts')
 SERVER = None
 JOBS = {}
@@ -548,53 +570,6 @@ INDEX_HTML = r"""<!doctype html>
       .router-card.root {
         background: #eef6ff;
       }
-      /* Agent UI styles */
-      .agent-section {
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        background: #f8fbff;
-        padding: 12px;
-        margin-bottom: 12px;
-      }
-      .agent-header {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 10px;
-      }
-      .agent-list {
-        display: grid;
-        gap: 8px;
-        margin-top: 10px;
-      }
-      .agent-item {
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 10px;
-        background: white;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-      }
-      .agent-checkboxes {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 12px;
-      }
-      .agent-checkboxes .checkbox-line {
-        margin: 0;
-      }
-      .agent-info {
-        flex: 1;
-      }
-      .agent-name {
-        font-weight: 600;
-        color: var(--ink);
-      }
-      .agent-desc {
-        font-size: 12px;
-        color: var(--muted);
-      }
       @media (max-width: 920px) {
         body {
           overflow: auto;
@@ -664,7 +639,7 @@ INDEX_HTML = r"""<!doctype html>
               </div>
               <div class="span-3">
                 <label>&nbsp;</label>
-                <div class="muted">Use these credentials to reach the router from `playground-net`.</div>
+                <div class="muted">Use these credentials to reach the router from `scl-playground-net`.</div>
               </div>
             </div>
           </div>
@@ -677,6 +652,24 @@ INDEX_HTML = r"""<!doctype html>
               <div class="muted" style="padding-top: 28px">
                 The `scl-hackerlab` container is attached here so you can start from that network and reach its hosts.
               </div>
+            </div>
+          </div>
+          <div class="row" style="margin-bottom: 10px">
+            <div class="span-3">
+              <label for="slipsEnabled">SLIPS monitoring</label>
+              <label style="display:flex;align-items:center;gap:8px;font-weight:400;padding-top:6px">
+                <input type="checkbox" id="slipsEnabled" style="width:auto"> Enable IDS sensor + autonomous defender
+              </label>
+            </div>
+            <div class="span-5">
+              <label for="slipsCaptureSource">Capture source (router)</label>
+              <select id="slipsCaptureSource"></select>
+            </div>
+            <div class="span-4">
+              <label for="slipsDefenderEnabled">Defender</label>
+              <label style="display:flex;align-items:center;gap:8px;font-weight:400;padding-top:6px">
+                <input type="checkbox" id="slipsDefenderEnabled" style="width:auto"> Auto-respond to alerts via soc_god
+              </label>
             </div>
           </div>
           <div class="router-box">
@@ -710,24 +703,6 @@ INDEX_HTML = r"""<!doctype html>
           <h2>Selected Topology JSON</h2>
           <textarea id="selectedJson" class="json" readonly>{}</textarea>
         </aside>
-      </div>
-
-      <!-- Agent UI Section -->
-      <div class="agent-section">
-        <div class="agent-header">
-          <h2>OpenCode Agents</h2>
-          <div class="toolbar">
-            <label class="checkbox-line">
-              <input id="agentEnabled" type="checkbox">
-              <span>Enable OpenCode Agent Support</span>
-            </label>
-          </div>
-        </div>
-        <p class="muted">Enable AI agents to assist with network topology tasks. Requires OPENCODE_API_KEY environment variable.</p>
-        <div id="agentList" class="agent-list"></div>
-        <div class="toolbar" style="margin-top: 10px">
-          <button id="addAgent" class="secondary" disabled>Add Agent to Host</button>
-        </div>
       </div>
     </main>
     <script>
@@ -770,7 +745,6 @@ INDEX_HTML = r"""<!doctype html>
       setTimeout(fitHostIframe, 1200);
 
       const HOST_TYPES = __HOST_TYPES__;
-      const AVAILABLE_AGENTS = __AVAILABLE_AGENTS__;
       const networksEl = document.getElementById('networks');
       const firewallGraphEl = document.getElementById('firewallGraph');
       const statusEl = document.getElementById('status');
@@ -784,9 +758,6 @@ INDEX_HTML = r"""<!doctype html>
       const routerPassword = document.getElementById('routerPassword');
       const hackerlabNetwork = document.getElementById('hackerlabNetwork');
       const routersEl = document.getElementById('routers');
-      const agentEnabled = document.getElementById('agentEnabled');
-      const agentListEl = document.getElementById('agentList');
-      const addAgentBtn = document.getElementById('addAgent');
 
       let model = null;
       let saved = [];
@@ -798,12 +769,6 @@ INDEX_HTML = r"""<!doctype html>
       function roleOptions(selected) {
         return Object.entries(HOST_TYPES).map(([value, info]) => {
           return `<option value="${value}" ${value === selected ? 'selected' : ''}>${info.label}</option>`;
-        }).join('');
-      }
-
-      function agentOptions(selected) {
-        return Object.entries(AVAILABLE_AGENTS).map(([value, info]) => {
-          return `<option value="${value}" ${value === selected ? 'selected' : ''}>${value}</option>`;
         }).join('');
       }
 
@@ -879,7 +844,7 @@ INDEX_HTML = r"""<!doctype html>
             firewall: { allowed: defaultFirewall(nets) }
           },
           infrastructure: { hackerlab_network_id: nets[0]?.id || '' },
-          opencode_agent: { enabled: false },
+          monitoring: { slips: { enabled: false, capture_source: '', defender_enabled: true } },
           networks: nets,
           visual: { routers: {}, networks: {} }
         };
@@ -900,8 +865,12 @@ INDEX_HTML = r"""<!doctype html>
         if (!model.infrastructure.hackerlab_network_id || !model.networks.find((network) => network.id === model.infrastructure.hackerlab_network_id)) {
           model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
         }
-        model.opencode_agent = model.opencode_agent || {};
-        model.opencode_agent.enabled = Boolean(model.opencode_agent.enabled);
+        model.monitoring = model.monitoring || {};
+        model.monitoring.slips = model.monitoring.slips || {};
+        const slips = model.monitoring.slips;
+        if (typeof slips.enabled !== 'boolean') slips.enabled = false;
+        if (typeof slips.defender_enabled !== 'boolean') slips.defender_enabled = true;
+        slips.capture_source = slips.capture_source || (model.routers[0] && model.routers[0].id) || '';
         model.networks.forEach((network) => {
           normalizeNetworkRouters(network);
           if (!network.router_ids.includes(network.default_router_id)) {
@@ -921,50 +890,19 @@ INDEX_HTML = r"""<!doctype html>
         routerPassword.value = model.router.password;
         hackerlabNetwork.innerHTML = model.networks.map((network) => `<option value="${escapeHtml(network.id)}" ${network.id === model.infrastructure.hackerlab_network_id ? 'selected' : ''}>${escapeHtml(network.name)}</option>`).join('');
         hackerlabNetwork.value = model.infrastructure.hackerlab_network_id || '';
-        agentEnabled.checked = model.opencode_agent.enabled;
-        addAgentBtn.disabled = !model.opencode_agent.enabled;
+        const slipsCaptureSource = document.getElementById('slipsCaptureSource');
+        if (slipsCaptureSource) {
+          slipsCaptureSource.innerHTML = model.routers.map((r) => `<option value="${escapeHtml(r.id)}" ${r.id === model.monitoring.slips.capture_source ? 'selected' : ''}>${escapeHtml(r.name || r.id)}</option>`).join('');
+          slipsCaptureSource.value = model.monitoring.slips.capture_source || (model.routers[0] && model.routers[0].id) || '';
+        }
+        const slipsEnabledEl = document.getElementById('slipsEnabled');
+        const slipsDefenderEl = document.getElementById('slipsDefenderEnabled');
+        if (slipsEnabledEl) slipsEnabledEl.checked = !!model.monitoring.slips.enabled;
+        if (slipsDefenderEl) slipsDefenderEl.checked = !!model.monitoring.slips.defender_enabled;
         routersEl.innerHTML = model.routers.map((router, index) => routerTemplate(router, index)).join('');
         networksEl.innerHTML = model.networks.map((network, index) => networkTemplate(network, index)).join('');
         firewallGraphEl.innerHTML = firewallGraphTemplate();
-        renderAgentList();
         selectedJsonEl.value = JSON.stringify(collect(), null, 2);
-      }
-
-      function renderAgentList() {
-        if (!model.opencode_agent.enabled) {
-          agentListEl.innerHTML = '<p class="muted">Enable OpenCode Agent Support to add agents to hosts.</p>';
-          return;
-        }
-
-        const agentsWithHosts = [];
-        model.networks.forEach(network => {
-          network.hosts.forEach(host => {
-            if (host.agents && host.agents.length > 0) {
-              host.agents.forEach(agent => {
-                agentsWithHosts.push({
-                  host: host.name,
-                  network: network.name,
-                  agent: agent
-                });
-              });
-            }
-          });
-        });
-
-        if (agentsWithHosts.length === 0) {
-          agentListEl.innerHTML = '<p class="muted">No agents configured. Select agents for each host in the network configuration.</p>';
-          return;
-        }
-
-        agentListEl.innerHTML = agentsWithHosts.map(item => `
-          <div class="agent-item">
-            <div class="agent-info">
-              <div class="agent-name">${escapeHtml(item.agent)} agent</div>
-              <div class="agent-desc">${escapeHtml(item.host)} on ${escapeHtml(item.network)}</div>
-            </div>
-            <button class="danger secondary" data-action="remove-agent" data-host="${escapeHtml(item.host)}">Remove</button>
-          </div>
-        `).join('');
       }
 
       function normalizeVisual(visual) {
@@ -1183,10 +1121,11 @@ INDEX_HTML = r"""<!doctype html>
       function hostTemplate(host, networkIndex, hostIndex) {
         const network = model.networks[networkIndex];
         const hostIp = network ? networkHostIp(network.cidr, hostIndex + 1) : '';
+        const hasAgents = host.agents && host.agents.length > 0;
         return `
           <div class="host" data-host="${hostIndex}">
             <div class="host-head">
-              <h4>${escapeHtml(host.name || `host-${hostIndex + 1}`)}</h4>
+              <h4>${escapeHtml(host.name || `host-${hostIndex + 1}`)}${hasAgents ? ' <span class="pill" style="background:#eef6ff;color:#1d4ed8">OpenCode</span>' : ''}</h4>
               <span class="inline-ip">IP <code>${escapeHtml(hostIp)}</code></span>
             </div>
             <div class="row">
@@ -1219,20 +1158,7 @@ INDEX_HTML = r"""<!doctype html>
                   <span>Enable SSH on this host</span>
                 </label>
               </div>
-              ${model.opencode_agent?.enabled ? `
-              <div class="span-6">
-                <label>OpenCode Agents</label>
-                <div class="agent-checkboxes">
-                  ${Object.keys(AVAILABLE_AGENTS).map(agent => `
-                    <label class="checkbox-line">
-                      <input type="checkbox" data-field="host.agents" value="${agent}" ${(host.agents || []).includes(agent) ? 'checked' : ''}>
-                      <span>${escapeHtml(agent)}</span>
-                    </label>
-                  `).join('')}
-                </div>
-              </div>
-              ` : ''}
-              <div class="span-${model.opencode_agent?.enabled ? '6' : '8'}">
+              <div class="span-8">
                 <label>Data prompt</label>
                 <input data-field="host.data_prompt" placeholder="Example: internal invoices for a fake finance department" value="${escapeHtml(host.data_prompt || '')}">
               </div>
@@ -1522,9 +1448,15 @@ INDEX_HTML = r"""<!doctype html>
         model.router.password = routerPassword.value || 'strato';
         model.infrastructure = model.infrastructure || {};
         model.infrastructure.hackerlab_network_id = hackerlabNetwork.value || model.networks[0]?.id || '';
+        model.monitoring = model.monitoring || {};
+        model.monitoring.slips = model.monitoring.slips || {};
+        const _slipsEnabled = document.getElementById('slipsEnabled');
+        const _slipsCapture = document.getElementById('slipsCaptureSource');
+        const _slipsDefender = document.getElementById('slipsDefenderEnabled');
+        model.monitoring.slips.enabled = _slipsEnabled ? !!_slipsEnabled.checked : !!model.monitoring.slips.enabled;
+        model.monitoring.slips.capture_source = (_slipsCapture && _slipsCapture.value) || model.monitoring.slips.capture_source || (model.routers[0] && model.routers[0].id) || '';
+        model.monitoring.slips.defender_enabled = _slipsDefender ? !!_slipsDefender.checked : !!model.monitoring.slips.defender_enabled;
         model.routers = model.routers || defaultRouters();
-        model.opencode_agent = model.opencode_agent || {};
-        model.opencode_agent.enabled = Boolean(agentEnabled.checked);
         document.querySelectorAll('[data-router]').forEach((routerEl) => {
           const router = model.routers[Number(routerEl.dataset.router)];
           if (!router) return;
@@ -1559,9 +1491,9 @@ INDEX_HTML = r"""<!doctype html>
                 generate_data: checkedOf(hostEl, 'host.generate_data'),
                 data_prompt: valueOf(hostEl, 'host.data_prompt'),
                 data_content: valueOf(hostEl, 'host.data_content'),
-                agents: model.opencode_agent.enabled ? Array.from(hostEl.querySelectorAll('[data-field="host.agents"]:checked')).map(el => el.value) : []
+                agents: host.agents || []
               };
-            });
+          });
         });
         model.router.firewall = model.router.firewall || {};
         model.router.firewall.allowed = model.router.firewall.allowed || [];
@@ -1720,77 +1652,6 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
 
-      function showAddAgentDialog() {
-        if (!model.opencode_agent.enabled) {
-          alert('Enable OpenCode Agent Support first');
-          return;
-        }
-
-        let networkOptions = model.networks.map((net, ni) =>
-          `<option value="${ni}">${escapeHtml(net.name)}</option>`
-        ).join('');
-
-        let hostOptions = model.networks[0].hosts.map((host, hi) =>
-          `<option value="0-${hi}">${escapeHtml(host.name)}</option>`
-        ).join('');
-
-        let agentOptions = Object.keys(AVAILABLE_AGENTS).map(agent =>
-          `<option value="${agent}">${escapeHtml(agent)}</option>`
-        ).join('');
-
-        const dialog = document.createElement('div');
-        dialog.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000';
-        dialog.innerHTML = `
-          <div style="background:white;padding:20px;border-radius:8px;max-width:400px;width:100%">
-            <h3>Add Agent to Host</h3>
-            <div style="margin-bottom:10px">
-              <label>Network</label>
-              <select id="agentNetwork" style="width:100%;margin-top:5px">${networkOptions}</select>
-            </div>
-            <div style="margin-bottom:10px">
-              <label>Host</label>
-              <select id="agentHost" style="width:100%;margin-top:5px">${hostOptions}</select>
-            </div>
-            <div style="margin-bottom:10px">
-              <label>Agent Type</label>
-              <select id="agentTypeSelect" style="width:100%;margin-top:5px">${agentOptions}</select>
-            </div>
-            <div class="toolbar" style="justify-content:flex-end">
-              <button class="secondary" id="cancelAddAgent">Cancel</button>
-              <button id="confirmAddAgent">Add Agent</button>
-            </div>
-          </div>
-        `;
-
-        document.body.appendChild(dialog);
-
-        const networkSelect = dialog.querySelector('#agentNetwork');
-        const hostSelect = dialog.querySelector('#agentHost');
-
-        networkSelect.addEventListener('change', () => {
-          const ni = Number(networkSelect.value);
-          hostSelect.innerHTML = model.networks[ni].hosts.map((host, hi) =>
-            `<option value="${ni}-${hi}">${escapeHtml(host.name)}</option>`
-          ).join('');
-        });
-
-        dialog.querySelector('#cancelAddAgent').addEventListener('click', () => {
-          document.body.removeChild(dialog);
-        });
-
-        dialog.querySelector('#confirmAddAgent').addEventListener('click', () => {
-          const [ni, hi] = hostSelect.value.split('-').map(Number);
-          const agentType = dialog.querySelector('#agentTypeSelect').value;
-          const host = model.networks[ni].hosts[hi];
-          host.agents = Array.isArray(host.agents) ? host.agents : [];
-          if (!host.agents.includes(agentType)) {
-            host.agents.push(agentType);
-          }
-          document.body.removeChild(dialog);
-          render();
-        });
-      }
-
       firewallGraphEl.addEventListener('pointerdown', (event) => {
         const node = event.target.closest?.('[data-drag-kind][data-node-id]');
         if (!node || !model) return;
@@ -1874,7 +1735,7 @@ INDEX_HTML = r"""<!doctype html>
             collect();
             return;
           }
-          if (event.target.id === 'agentEnabled') {
+          if (event.target.id === 'slipsEnabled' || event.target.id === 'slipsCaptureSource' || event.target.id === 'slipsDefenderEnabled') {
             collect();
             render();
             return;
@@ -1892,10 +1753,6 @@ INDEX_HTML = r"""<!doctype html>
               password: 'strato'
             });
             render();
-            return;
-          }
-          if (event.target.id === 'addAgent') {
-            showAddAgentDialog();
             return;
           }
           if (action === 'apply-host-count') {
@@ -2077,6 +1934,7 @@ def normalize_identifier(value, fallback):
 
 
 def host_agents(host):
+    """Get list of agents configured for a host. Returns empty list if no agents."""
     agents = host.get('agents', [])
     if not isinstance(agents, list):
         agents = []
@@ -2189,8 +2047,13 @@ def validate_topology(topology):
     hackerlab_network_id = infrastructure.get('hackerlab_network_id')
     if not hackerlab_network_id or hackerlab_network_id not in seen_networks:
         infrastructure['hackerlab_network_id'] = networks[0]['id']
-    opencode_agent = topology.setdefault('opencode_agent', {})
-    opencode_agent['enabled'] = bool(opencode_agent.get('enabled', False))
+    # SLIPS monitoring (opt-in, default off). capture_source is a router host id/name
+    # whose traffic gets tcpdump'd to a shared pcaps volume for the slips-sensor.
+    monitoring = topology.setdefault('monitoring', {})
+    slips = monitoring.setdefault('slips', {})
+    slips.setdefault('enabled', False)
+    slips.setdefault('capture_source', root_router_id)
+    slips.setdefault('defender_enabled', True)
     return topology
 
 
@@ -2261,7 +2124,9 @@ echo {shell_quote(username + ':' + password)} | chpasswd || true
 def opencode_agent_block(host, topology):
     """Generate the OpenCode agent initialization block for a host."""
     agents = host_agents(host)
+    print(f"🔍 opencode_agent_block: host={host.get('name')}, agents={agents}, generate_opencode_config={generate_opencode_config is not None}")
     if not agents or not generate_opencode_config:
+        print(f"⚠️ opencode_agent_block returning empty: agents={agents}, generate_opencode_config={generate_opencode_config}")
         return ''
 
     # Generate agent configurations for all agents
@@ -2270,8 +2135,10 @@ def opencode_agent_block(host, topology):
         try:
             agent_config = generate_opencode_config(agent_type)
             agent_configs[agent_type] = agent_config.get('system', {}).get('prompt', 'You are a helpful assistant.')
+            print(f"✅ Generated config for agent {agent_type}")
         except (ValueError, KeyError) as e:
             agent_configs[agent_type] = f'# Error generating config for {agent_type}: {e}'
+            print(f"❌ Error generating config for {agent_type}: {e}")
 
     # Build the agents section for OpenCode config
     agents_section = {}
@@ -2296,7 +2163,8 @@ def opencode_agent_block(host, topology):
 # OpenCode Agent Initialization for: {agents_label}
 mkdir -p /root/.config/opencode /root/.local/share/opencode /var/log/opencode
 
-# Write opencode.json configuration
+# Write opencode.json configuration with environment variable placeholders
+# OpenCode will substitute {{env:VAR_NAME}} with actual environment variable values
 cat > /root/.config/opencode/opencode.json <<'OPENCODE_JSON'
 {{
   "$$schema": "https://opencode.ai/config.json",
@@ -2305,8 +2173,8 @@ cat > /root/.config/opencode/opencode.json <<'OPENCODE_JSON'
       "npm": "@ai-sdk/openai-compatible",
       "name": "e-INFRA CZ Chat API",
       "options": {{
-        "baseURL": "{llm_url}",
-        "apiKey": "{api_key}"
+        "baseURL": "{{env:LLM_URL}}",
+        "apiKey": "{{env:OPENCODE_API_KEY}}"
       }},
       "models": {{
         "{llm_model}": {{
@@ -2341,12 +2209,12 @@ cat > /root/.config/opencode/opencode.json <<'OPENCODE_JSON'
 }}
 OPENCODE_JSON
 
-# Write auth.json
+# Write auth.json - OpenCode will also use {{env:}} placeholders here
 cat > /root/.local/share/opencode/auth.json <<'AUTH_JSON'
 {{
   "e-infra-chat": {{
     "type": "api",
-    "key": "{api_key}"
+    "key": "{{env:OPENCODE_API_KEY}}"
   }}
 }}
 AUTH_JSON
@@ -2354,7 +2222,7 @@ AUTH_JSON
 # Wait for OpenCode server to be healthy (started by entrypoint)
 timeout=30
 while [ $$timeout -gt 0 ]; do
-  if curl -s http://localhost:4096/global/health | grep -q "healthy.*true"; then
+  if curl -s --connect-timeout 2 --max-time 3 http://localhost:4096/global/health | grep -q "healthy.*true"; then
     echo "OpenCode server is ready"
     break
   fi
@@ -2366,9 +2234,7 @@ echo "OpenCode agents configured: {agents_label}"
 """.format(
         agents_label=', '.join(agents),
         agents_section=agents_section_json,
-        llm_url=LLM_URL_FULL,
-        llm_model=LLM_MODEL,
-        api_key=os.environ.get('OPENCODE_API_KEY', '')
+        llm_model=LLM_MODEL
     )
 
 
@@ -2383,16 +2249,22 @@ def host_script(topology, network, host, host_index, gateway):
 
     # Add OpenCode agent block if configured
     agent_block = ''
-    if host_agents(host):
+    agents_list = host_agents(host)
+    if agents_list:
+        print(f"🤖 Adding agents {agents_list} for host {host['name']}")
         agent_block = opencode_agent_block(host, topology)
+        if not agent_block:
+            print(f"⚠️ opencode_agent_block returned empty for {agents_list}")
+    else:
+        print(f"ℹ️ No agents configured for host {host['name']}")
 
     # Internet access configuration
     internet_config = ''
     if network.get('internet'):
-        # For internet access, we use playground-net's gateway (172.22.0.1)
+        # For internet access, we use scl-playground-net's gateway (172.22.0.1)
         # and add a specific route for the internal network via the router
         internet_config = f'''
-# Configure internet access via playground-net
+# Configure internet access via scl-playground-net
 ip route replace default via 172.22.0.1 dev eth1 || true
 ip route replace {network['cidr']} dev eth0 || true
 # Configure DNS to use public DNS servers
@@ -2538,6 +2410,20 @@ table ip nat {
   }
 }
 """ if is_root else ''
+    # SLIPS capture: if this router is the monitoring capture_source, dump pcaps
+    # (rotated every 30s, excluding the OpenCode API port) to /pcaps. Rotation
+    # yields completed captures (cap_HHMMSS.pcap) that watch_pcaps will process;
+    # a single growing router.pcap would be skipped by the watcher.
+    slips_cfg = (topology.get('monitoring') or {}).get('slips') or {}
+    capture_source = slips_cfg.get('capture_source') or ''
+    is_capture_router = bool(slips_cfg.get('enabled')) and bool(capture_source) and (
+        router.get('id') == capture_source or router.get('name') == capture_source
+    )
+    capture_block = (
+        "mkdir -p /pcaps && "
+        "(tcpdump -i any -U -G 30 -W 20 -w '/pcaps/cap_%H%M%S.pcap' 'not port 4096' >/dev/null 2>&1 &) || true"
+        if is_capture_router else ''
+    )
     return f"""set -eu
 sysctl -w net.ipv4.ip_forward=1 || true
 sysctl -w net.ipv4.conf.all.rp_filter=0 || true
@@ -2557,6 +2443,7 @@ table inet filter {{
 }}
 {nat_block}EOF
 nft -f /tmp/router-rules.nft || true
+{capture_block}
     tail -f /dev/null
 """
 
@@ -2576,10 +2463,6 @@ def generate_compose(topology, opencode_images=None):
     router_by_id, children_map, networks_by_router = build_router_maps({**topology, 'routers': routers})
     root_router_id = routers[0]['id']
 
-    # Check if OpenCode agent is enabled globally (legacy support)
-    opencode_enabled = topology.get('opencode_agent', {}).get('enabled', False)
-    base_image = OPENCODE_IMAGE if opencode_enabled else BASE_IMAGE
-
     # Use provided opencode_images mapping or empty dict
     if opencode_images is None:
         opencode_images = {}
@@ -2587,9 +2470,17 @@ def generate_compose(topology, opencode_images=None):
     compose = {
         'services': {},
         'networks': {
-            'playground-net': {'external': True, 'name': 'playground-net'}
+            'scl-playground-net': {'external': True, 'name': 'scl-playground-net'}
         }
     }
+
+    # SLIPS monitoring: a shared pcaps volume is declared only when enabled. The
+    # capture_source router writes pcaps here; the slips-sensor reads them.
+    slips_cfg = (topology.get('monitoring') or {}).get('slips') or {}
+    slips_enabled = bool(slips_cfg.get('enabled'))
+    pcaps_volume = f'{project_prefix}-pcaps' if slips_enabled else None
+    if slips_enabled:
+        compose['volumes'] = {pcaps_volume: {'name': pcaps_volume}}
 
     # User-facing network bridges.
     network_router_ip_maps = {}
@@ -2640,7 +2531,7 @@ def generate_compose(topology, opencode_images=None):
     for router in routers:
         router_id = router['id']
         service_name = f'router-{router_key(router_id)}'
-        router_networks = {'playground-net': {}} if router_id == root_router_id else {}
+        router_networks = {'scl-playground-net': {}}
         for network in router_network_attaches.get(router_id, []):
             network_key = f'topo_{network["id"]}'
             router_networks[network_key] = {'ipv4_address': network_router_ip_maps[network['id']].get(router_id, router_ip(network['cidr']))}
@@ -2678,15 +2569,18 @@ def generate_compose(topology, opencode_images=None):
                 f'scl.router={router_id}',
             ],
         }
+        # The capture_source router writes pcaps to the shared volume (NET_RAW for tcpdump).
+        if slips_enabled and pcaps_volume and (
+            router_id == (slips_cfg.get('capture_source') or '') or
+            router.get('name') == (slips_cfg.get('capture_source') or '')
+        ):
+            compose['services'][service_name]['cap_add'] = ['NET_ADMIN', 'NET_RAW']
+            compose['services'][service_name]['volumes'] = [f'{pcaps_volume}:/pcaps']
 
     for index, network in enumerate(topology['networks'], start=1):
         network_key = f'topo_{network["id"]}'
         gateway_router_id = network.get('default_router_id') or network.get('router_ids', [root_router_id])[0]
         gateway_ip = network_router_ip_maps[network['id']].get(gateway_router_id, router_ip(network['cidr']))
-
-        # Determine if any host in this network has an agent configured
-        network_has_agents = any(host_agents(h) for h in network['hosts'])
-        network_base_image = OPENCODE_IMAGE if network_has_agents else BASE_IMAGE
 
         for host_index, host in enumerate(network['hosts'], start=1):
             service_name = f'{network["id"]}-{host["id"]}'
@@ -2694,11 +2588,11 @@ def generate_compose(topology, opencode_images=None):
             host_has_agents = bool(host_agents(host))
             host_base_image = host.get('image', 'ubuntu:24.04')
 
-            # Use OS-specific OpenCode image if an agent is configured for this host
+            # Dynamic image selection: choose base image if no agents, OpenCode image if agents present
             if host_has_agents:
                 host_image = opencode_images.get(host_base_image, OPENCODE_IMAGE)
             else:
-                host_image = network_base_image
+                host_image = BASE_IMAGE
 
             service_config = {
                 'image': host_image,
@@ -2711,31 +2605,28 @@ def generate_compose(topology, opencode_images=None):
                     'scl.plugin=network-topology',
                     f'scl.topology={topology["id"]}',
                     f'scl.network={network["id"]}',
+                    f'scl.host={host["id"]}',
                     f'scl.host_type={host["type"]}',
+                    f'scl.has_agents={"true" if host_has_agents else "false"}',
                 ],
             }
 
-            # Add playground-net for internet access if enabled
-            if network.get('internet'):
-                service_config['networks']['playground-net'] = {}
+            # Attach all hosts to scl-playground-net for SCL service connectivity
+            service_config['networks']['scl-playground-net'] = {}
 
-            # Add agent scripts and shared modules volumes if an agent is configured
+            # Conditional OpenCode configuration (ports, volumes, environment, healthcheck) only when agents present
             if host_has_agents:
                 # Mount the SCL shared modules directory and related files
-                # Get the actual SCL directory (parent of network-topology)
-                # Important: resolve __file__ first to handle relative paths
-                scl_base = Path(__file__).resolve().parent.parent
-                scl_opencode_dir = (scl_base / 'stratocyberlab/images/scl-plugin-network-topology-ubuntu-opencode')
+                # Use absolute path for images directory (mounted in container at /app/images)
+                scl_opencode_dir = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-plugin-network-topology-ubuntu-opencode'
                 volumes = [
                     f'{AGENTS_HOST_PATH}:/app/agents:ro',
                     f'{scl_opencode_dir}/shared:/opt/shared:ro',
-                    f'{scl_opencode_dir}/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro',
-                    f'{scl_opencode_dir}/db_admin_opencode_client.py:/opt/agents/db_admin_opencode_client.py:ro',
+                    # Note: entrypoint.sh and db_admin_opencode_client.py are already in the ubuntu-opencode image
                 ]
                 service_config['volumes'] = volumes
 
                 # Modify host_script to include entrypoint at the beginning
-                original_command = service_config['command']
                 entrypoint_setup = f'''
 # Start OpenCode server via entrypoint
 bash /usr/local/bin/entrypoint.sh &
@@ -2744,7 +2635,7 @@ ENTRYPOINT_PID=$$!
 # Wait for OpenCode server to start
 timeout=15
 while [ $$timeout -gt 0 ]; do
-    if curl -s http://localhost:4096/global/health | grep -q "healthy.*true"; then
+    if curl -s --connect-timeout 2 --max-time 3 http://localhost:4096/global/health | grep -q "healthy.*true"; then
         echo "OpenCode server is ready"
         break
     fi
@@ -2758,18 +2649,49 @@ done
                 service_config['command'] = ['sh', '-lc', entrypoint_setup + host_script(topology, network, host, host_index, gateway_ip)]
 
                 # Add SSH and compromised credentials environment variables
+                # Get the actual API key value from the environment at generation time
+                # This allows the docker-compose file to work when started directly
+                api_key_value = os.environ.get('OPENCODE_API_KEY', '')
                 service_config['environment'] = {
-                    'OPENCODE_API_KEY': OPENCODE_API_KEY or '${OPENCODE_API_KEY:-}',
+                    'OPENCODE_API_KEY': api_key_value,
                     'LLM_URL': LLM_URL_FULL,
                     'LLM_MODEL': LLM_MODEL,
                     'SSH_COMPROMISED_USER': 'labuser',
                     'SSH_COMPROMISED_PASS': host.get('password', 'strato'),
                 }
 
-                # Expose OpenCode HTTP API port
-                service_config['ports'] = ['4096:4096']
+                # OpenCode HTTP API port — internal only (not published to the host).
+                # Publishing host port 4096 for every agent host made multiple agents
+                # collide on the same host port; the agent-manager reaches OpenCode
+                # over scl-playground-net by container name instead.
+                service_config['expose'] = ['4096']
 
             compose['services'][service_name] = service_config
+
+    # SLIPS sensor sidecar: joined to scl-playground-net so it can reach the
+    # agent-manager, mounting the shared pcaps volume. It runs SLIPS (patched)
+    # on the router's captures and forwards alerts to the defender API.
+    if slips_enabled and pcaps_volume:
+        defender_url = os.environ.get(
+            'DEFENDER_URL', 'http://scl-agent-manager-dashboard:8080/api/defender/alerts'
+        )
+        compose['services']['slips-sensor'] = {
+            'image': SLIPS_IMAGE,
+            'container_name': f'{project_prefix}-slips-sensor',
+            'cap_add': ['NET_ADMIN', 'NET_RAW'],
+            'volumes': [f'{pcaps_volume}:/pcaps'],
+            'networks': {'scl-playground-net': {}},
+            'environment': {
+                'DEFENDER_URL': defender_url,
+                'RUN_ID': topology['id'],
+                'PCAP_DIR': '/pcaps',
+            },
+            'labels': [
+                'scl.plugin=network-topology',
+                f'scl.topology={topology["id"]}',
+                'scl.role=slips-sensor',
+            ],
+        }
 
     return compose
 
@@ -2887,7 +2809,7 @@ def build_opencode_image(base_image, opencode_image):
             # Alpine BASE_IMAGE needs bash, curl, sudo, openssh added
             # Also add libstdc++ and libgcc for OpenCode binary
             # And sqlite for the sqlite3 CLI tool
-            scl_packages = 'bash curl sudo openssh openssh-server libstdc++ libgcc sqlite'
+            scl_packages = 'bash curl sudo openssh openssh-server libstdc++ libgcc sqlite iptables iproute2'
         else:
             scl_packages = ''  # Everything already there
 
@@ -2937,6 +2859,11 @@ RUN echo "labuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/labuser && \\
     chmod 440 /etc/sudoers.d/labuser && \\
     ssh-keygen -A 2>/dev/null || true
 
+# Copy OpenCode configuration file with {{env:}} placeholders
+# This is a fallback config - opencode_agent_block will override with selected agents
+# OpenCode will substitute {{env:VAR_NAME}} with actual environment variable values
+RUN printf '{{\\n  "$schema": "https://opencode.ai/config.json",\\n  "provider": {{\\n    "e-infra-chat": {{\\n      "npm": "@ai-sdk/openai-compatible",\\n      "name": "e-INFRA CZ Chat API",\\n      "options": {{\\n        "baseURL": "{{{{env:LLM_URL}}}}",\\n        "apiKey": "{{{{env:OPENCODE_API_KEY}}}}"\\n      }},\\n      "models": {{\\n        "gemma4": {{\\n          "name": "Gemma4",\\n          "limit": {{\\n            "context": 200000,\\n            "output": 65536\\n          }}\\n        }}\\n      }}\\n    }}\\n  }},\\n  "model": "e-infra-chat/gemma4",\\n  "autoupdate": true,\\n  "permission": {{\\n    "default": "allow",\\n    "bash": {{ "*": "allow" }},\\n    "edit": {{ "*": "allow" }},\\n    "write": {{ "*": "allow" }}\\n  }}\\n}}\\n' > /root/.config/opencode/opencode.json
+
 # Expose OpenCode HTTP API port
 EXPOSE 4096
 
@@ -2964,13 +2891,17 @@ CMD ["/bin/bash"]
     return opencode_image
 
 
-def ensure_opencode_images(topology):
+def ensure_opencode_images(topology, force_rebuild=False):
     """Ensure OpenCode variants exist for all base OS images in the topology.
 
     This function:
     1. Collects all unique base images from hosts that have agents
     2. Checks if OpenCode variants exist for each
-    3. Builds missing variants
+    3. Builds missing variants (or rebuilds if force_rebuild=True)
+
+    Args:
+        topology: The topology configuration
+        force_rebuild: If True, rebuilds all OpenCode images even if they exist
 
     Returns a dict mapping base_image -> opencode_image
     """
@@ -2985,17 +2916,21 @@ def ensure_opencode_images(topology):
                     opencode_image = get_opencode_image_name(base_image)
                     opencode_images[base_image] = opencode_image
 
-    # Build missing OpenCode images
+    # Build missing OpenCode images (or rebuild if force_rebuild=True)
     for base_image, opencode_image in opencode_images.items():
-        result = subprocess.run(
-            ['docker', 'image', 'inspect', opencode_image],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
+        if force_rebuild:
+            print(f"🔄 Force rebuilding OpenCode image: {opencode_image}")
             build_opencode_image(base_image, opencode_image)
         else:
-            print(f"✅ OpenCode image exists: {opencode_image}")
+            result = subprocess.run(
+                ['docker', 'image', 'inspect', opencode_image],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                build_opencode_image(base_image, opencode_image)
+            else:
+                print(f"✅ OpenCode image exists: {opencode_image}")
 
     return opencode_images
 
@@ -3024,7 +2959,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
             dockerfile = """FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-    bash ca-certificates curl iproute2 iputils-ping netcat-openbsd nftables openssh-server python3 sqlite3 sudo \\
+    bash ca-certificates curl iproute2 iputils-ping netcat-openbsd nftables tcpdump openssh-server python3 sqlite3 sudo procps \\
   && mkdir -p /run/sshd \\
   && rm -rf /var/lib/apt/lists/*
 """
@@ -3038,6 +2973,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
         )
         if build.returncode != 0:
             raise RuntimeError(build.stderr or build.stdout or f'Docker image build failed for {image}')
+
+
+def ensure_slips_image(topology):
+    """Build the SLIPS sensor image (from its static context dir) if monitoring
+    is enabled and the image is missing. Unlike the opencode image (built from a
+    piped Dockerfile), SLIPS needs a real build context for its patches/scripts.
+    """
+    slips_cfg = (topology.get('monitoring') or {}).get('slips') or {}
+    if not slips_cfg.get('enabled'):
+        return
+    result = subprocess.run(['docker', 'image', 'inspect', SLIPS_IMAGE], capture_output=True, text=True)
+    if result.returncode == 0:
+        print(f"✅ SLIPS image exists: {SLIPS_IMAGE}")
+        return
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-slips-sensor'
+    if not context.exists():
+        raise RuntimeError(f'SLIPS image build context not found: {context}')
+    print(f"🔨 Building SLIPS sensor image: {SLIPS_IMAGE} from {context}")
+    build = subprocess.run(
+        ['docker', 'build', '-t', SLIPS_IMAGE, str(context)],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {SLIPS_IMAGE}')
+    print(f"✅ Built SLIPS image: {SLIPS_IMAGE}")
 
 
 def compose_project_name(topology_id):
@@ -3081,12 +3041,17 @@ def run_compose(topology_id, args):
     return result.stdout
 
 
-def start_topology(topology_id):
+def start_topology(topology_id, force_rebuild=False):
     ensure_base_image()
     topology = read_json(topology_path(topology_id))
 
     # Ensure OS-specific OpenCode images are built
-    opencode_images = ensure_opencode_images(topology)
+    # Check environment variable for force rebuild
+    if os.environ.get('FORCE_REBUILD_IMAGES', '').lower() in ('1', 'true', 'yes'):
+        force_rebuild = True
+
+    opencode_images = ensure_opencode_images(topology, force_rebuild=force_rebuild)
+    ensure_slips_image(topology)
 
     compose = generate_compose(topology, opencode_images)
     with open(compose_path(topology_id), 'w', encoding='utf8') as file:
@@ -3144,7 +3109,7 @@ def sync_hackerlab_runtime(topology):
         current_networks = docker_inspect_json(['inspect', '-f', '{{json .NetworkSettings.Networks}}', container_name]) or {}
     except Exception:
         return {'status': 'missing'}
-    attached_network_names = [name for name in current_networks.keys() if topology['id'].lower() in name.lower() and name != 'playground-net']
+    attached_network_names = [name for name in current_networks.keys() if topology['id'].lower() in name.lower() and name != 'scl-playground-net']
     for network_name in attached_network_names:
         if network_name != selected_network_name:
             try:
@@ -3232,6 +3197,9 @@ class TopologyHandler(BaseHTTPRequestHandler):
             html = INDEX_HTML.replace('__HOST_TYPES__', json.dumps(HOST_TYPES))
             html = html.replace('__AVAILABLE_AGENTS__', json.dumps(available_agents))
             self.send_html(html)
+            return
+        if path == '/health':
+            self.send_json(200, {'status': 'healthy'})
             return
         if path == '/api/topologies':
             self.send_json(200, {'topologies': list_topologies()})
