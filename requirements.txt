@@ -1,0 +1,6 @@
+quart
+quart-cors
+pydantic
+docker
+aiohttp
+jinja2

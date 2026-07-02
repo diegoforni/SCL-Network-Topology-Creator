@@ -1,34 +1,28 @@
-name: network-topology
-
 services:
-  control-plane:
-    image: scl-plugin-network-topology-control-plane:latest
-    build: .
-    container_name: scl-plugin-network-topology-control-plane
-    stop_signal: SIGINT
+  network-topology:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scl-network-topology
     ports:
-      - "9002:9002"
-    env_file:
-      - ../../Trident_new/.env
-    environment:
-      - DASHBOARD_LLM_URL=http://dashboard/api/llm/chat
-      - AGENTS_HOST_PATH=/home/diego/SCLT/SCL-Network-Topology-Creator/agents
-      - OPENCODE_API_KEY=YOUR_OPENCODE_API_KEY_HERE
-      - LLM_URL=http://host.docker.internal:8080/p/diego/v1
-      - LLM_MODEL=qwen3-coder
+      - "${TOPOLOGY_PORT:-9004}:9002"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - network-topology-data:/app/data
-      - ./agents:/app/agents:ro
-      - ./agents:/agent-scripts:ro
+      - ./data:/app/data
+      # Mount shared directory - use environment variable or default
+      - ${SHARED_DIR:-./shared}:/app/shared:ro
+      # Mount images directory - use environment variable or default
+      - ${IMAGES_DIR:-../../images}:/app/images:ro
+      - ./.env:/app/.env:ro
+    environment:
+      - PLUGIN_ID=network-topology
+      - PLUGIN_VERSION=2.0.0
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - OPENCODE_API_KEY=${OPENCODE_API_KEY}
     networks:
-      - playground-net
-
-volumes:
-  network-topology-data:
-    name: scl-plugin-network-topology-data
+      - scl-playground-net
+    restart: unless-stopped
 
 networks:
-  playground-net:
+  scl-playground-net:
     external: true
-    name: playground-net
