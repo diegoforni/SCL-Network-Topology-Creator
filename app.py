@@ -25,19 +25,18 @@ if ENV_FILE.exists():
                 os.environ[key.strip()] = value.strip()
 
 # Add agents directory to sys.path for importing generate_opencode_config
-# The opencode_config.py is in the images directory
-# Try multiple possible paths with environment variable override
+# The opencode_config.py ships inside this plugin's own images directory
+# (plugins/network-topology/images/scl-plugin-network-topology-ubuntu/).
+# In the plugin container the host images dir is mounted at /app/images
+# (see docker-compose.yml: ${IMAGES_DIR:-./images}:/app/images:ro); for local
+# development (app.py run on the host) the images live in this plugin's own
+# ./images directory — fully self-contained, no stratocyberlab-level images dir.
 AGENTS_DIR = None
 possible_paths = [
     Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-plugin-network-topology-ubuntu',
     Path('/app/images/scl-plugin-network-topology-ubuntu'),
-    Path(__file__).parent.parent / 'images' / 'scl-plugin-network-topology-ubuntu'
+    Path(__file__).parent / 'images' / 'scl-plugin-network-topology-ubuntu',
 ]
-
-# Add local development path if running locally
-local_path = Path(__file__).parent.parent.parent / 'images' / 'scl-plugin-network-topology-ubuntu'
-if local_path.exists():
-    possible_paths.insert(0, local_path)
 
 for possible_path in possible_paths:
     if possible_path.exists() and (possible_path / 'opencode_config.py').exists():
