@@ -33,7 +33,8 @@
           "password": "strato",
           "ssh_enabled": false,
           "type": "normal-user",
-          "username": "labuser"
+          "username": "labuser",
+          "guardrail_enabled": true
         }
       ],
       "id": "attack_net",
@@ -63,7 +64,8 @@
           "password": "strato",
           "ssh_enabled": false,
           "type": "web-server",
-          "username": "labuser"
+          "username": "labuser",
+          "guardrail_enabled": null
         }
       ],
       "id": "victim_net",
@@ -95,5 +97,5 @@
       "username": "admin"
     }
   ],
-  "updated_at": "2026-06-23T04:00:44Z"
+  "updated_at": "2026-07-06T23:52:34Z"
 }

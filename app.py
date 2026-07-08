@@ -1,4 +1,5 @@
 import json
+import datetime
 import os
 import re
 import signal
@@ -55,6 +56,25 @@ except ImportError as e:
     generate_opencode_config = None
     AGENT_TEMPLATES = {}
 
+# --- Guardrail config: agent types subject to external auditing, and per-agent goals.
+# Prefer importing GUARDED_AGENTS / GUARDRAIL_GOALS from opencode_config.py when present
+# (single source of truth alongside the agent prompts). Fall back to hardcoded
+# canonical values if the module does not yet export them.
+GUARDED_AGENTS = ("coder56", "soc_god")
+GUARDRAIL_GOALS = {
+    "coder56": "Advance the assigned red-team objective (recon, exploitation, persistence) against the target.",
+    "soc_god": "Defend: analyze IDS alerts and remediate without losing SSH/443/4096 connectivity.",
+}
+try:
+    from opencode_config import GUARDED_AGENTS as _GUARDED_AGENTS, GUARDRAIL_GOALS as _GUARDRAIL_GOALS  # type: ignore
+    GUARDED_AGENTS = tuple(_GUARDED_AGENTS)
+    GUARDRAIL_GOALS = dict(_GUARDRAIL_GOALS)
+    print(f"✅ Imported guardrail config from opencode_config: GUARDED_AGENTS={GUARDED_AGENTS}")
+except ImportError:
+    print("ℹ️ opencode_config does not export GUARDED_AGENTS/GUARDRAIL_GOALS; using hardcoded canonical values.")
+except Exception as _e:  # defensive: bad shapes, partial exports, etc.
+    print(f"⚠️ Failed to import guardrail config from opencode_config ({_e}); using hardcoded canonical values.")
+
 HOST = '0.0.0.0'
 PORT = 9002
 DATA_DIR = Path(os.environ.get('TOPOLOGY_DATA_DIR', '/app/data'))
@@ -71,6 +91,10 @@ OPENCODE_API_KEY = os.environ.get('OPENCODE_API_KEY', '')
 LLM_URL_FULL = os.environ.get('LLM_URL', 'https://llm.ai.e-infra.cz/v1')
 LLM_MODEL = os.environ.get('LLM_MODEL', 'gemma4')
 AGENTS_HOST_PATH = os.environ.get('AGENTS_HOST_PATH', '/agent-scripts')
+# Host path bind-mounted (rw) into opencode + SLIPS topology containers so their
+# run logs persist on the host and are visible to the agent-manager's Replay.
+# Must match the agent-manager's OUTPUTS_DIR host path.
+OUTPUTS_HOST_PATH = os.environ.get('OUTPUTS_HOST_PATH', '/tmp/outputs')
 SERVER = None
 JOBS = {}
 JOBS_LOCK = threading.Lock()
@@ -2139,6 +2163,27 @@ def opencode_agent_block(host, topology):
             agent_configs[agent_type] = f'# Error generating config for {agent_type}: {e}'
             print(f"❌ Error generating config for {agent_type}: {e}")
 
+    # Guardrail: when any guarded agent type runs on this host, the built-in bash
+    # tool is disabled at the top level and a global plugin re-registers a custom
+    # "bash" tool (forwarder) that delegates non-trivial commands to the guardrail
+    # agent on 127.0.0.1:4097. Per-agent "bash": true is retained.
+    member_guarded = any(a in GUARDED_AGENTS for a in agents)
+    # Honor an explicit per-host guardrail_enabled flag (frontend toggle);
+    # absent (None) => auto (armed iff a guarded agent is present on the host).
+    guarded = host.get('guardrail_enabled') if host.get('guardrail_enabled') is not None else member_guarded
+    # tools_block is injected as a kwarg VALUE into the .format() template, so it
+    # must use single braces (kwarg values are NOT re-escaped by .format). It is
+    # placed at the top level of the heredoc JSON to disable the built-in bash so
+    # the global guardrail plugin can re-register a custom "bash" forwarder. Empty
+    # string for non-guarded hosts -> generated JSON is unchanged for them.
+    tools_block = (
+        '  "tools": {\n'
+        '    "bash": false\n'
+        '  },\n'
+        if guarded
+        else ''
+    )
+
     # Build the agents section for OpenCode config
     agents_section = {}
     for agent_type in agents:
@@ -2158,6 +2203,36 @@ def opencode_agent_block(host, topology):
 
     agents_section_json = json.dumps(agents_section, indent=2).replace('\n', '\n  ')
 
+    # Best-effort fallback: expose the guardrail env vars via /etc/profile.d so any
+    # login/SSH shell (and any process that sources profile.d) sees them, mirroring
+    # what PID 1 reads from the real container env. Only emitted for guarded hosts.
+    guardrail_profile_block = '''
+# Guardrail env fallback for login/SSH shells (best-effort mirror of PID 1 env)
+mkdir -p /etc/profile.d
+cat > /etc/profile.d/guardrail.sh <<'GUARDRAIL_PROFILE'
+export GUARDRAIL_ENABLED=1
+export GUARDRAIL_PROFILE={guardrail_profile_name}
+export GUARDRAIL_GOAL={guardrail_goal_quoted}
+export GUARDRAIL_HTTP_URL=http://127.0.0.1:4097
+GUARDRAIL_PROFILE
+chmod 644 /etc/profile.d/guardrail.sh 2>/dev/null || true
+''' if guarded else ''
+
+    # Resolve guardrail profile/goal for the profile.d fallback.
+    if "soc_god" in agents and "coder56" in agents:
+        guardrail_profile_name = "defender"
+    elif "soc_god" in agents:
+        guardrail_profile_name = "defender"
+    elif "coder56" in agents:
+        guardrail_profile_name = "coder56"
+    else:
+        # guarded is True but neither canonical name matched (custom GUARDED_AGENTS):
+        # default profile to coder56-style scope keeper.
+        guardrail_profile_name = "coder56"
+    guardrail_goal_key = "soc_god" if guardrail_profile_name == "defender" else "coder56"
+    guardrail_goal = GUARDRAIL_GOALS.get(guardrail_goal_key, '')
+    guardrail_goal_quoted = shell_quote(guardrail_goal)
+
     return """
 # OpenCode Agent Initialization for: {agents_label}
 mkdir -p /root/.config/opencode /root/.local/share/opencode /var/log/opencode
@@ -2167,7 +2242,7 @@ mkdir -p /root/.config/opencode /root/.local/share/opencode /var/log/opencode
 cat > /root/.config/opencode/opencode.json <<'OPENCODE_JSON'
 {{
   "$$schema": "https://opencode.ai/config.json",
-  "provider": {{
+{tools_block}  "provider": {{
     "e-infra-chat": {{
       "npm": "@ai-sdk/openai-compatible",
       "name": "e-INFRA CZ Chat API",
@@ -2229,11 +2304,17 @@ while [ $$timeout -gt 0 ]; do
   timeout=$$((timeout - 1))
 done
 
+{guardrail_profile_block}
 echo "OpenCode agents configured: {agents_label}"
 """.format(
         agents_label=', '.join(agents),
         agents_section=agents_section_json,
-        llm_model=LLM_MODEL
+        llm_model=LLM_MODEL,
+        tools_block=tools_block,
+        guardrail_profile_block=guardrail_profile_block.format(
+            guardrail_profile_name=guardrail_profile_name,
+            guardrail_goal_quoted=guardrail_goal_quoted,
+        ),
     )
 
 
@@ -2447,6 +2528,26 @@ nft -f /tmp/router-rules.nft || true
 """
 
 
+def resolve_run_id(topology_id):
+    """Compute a unique run id for THIS start so outputs never overwrite.
+
+    base = RUN_ID env override (else the topology id). If ``outputs/<base>/``
+    already exists (a prior run), append a timestamp ``-YYYYMMDD-HHMM`` to make
+    it unique. The first run of a topology (dir absent) keeps the clean base.
+    Computed ONCE per generate_compose and stamped on every container's RUN_ID
+    env (attacker, victim, slips) so guardrail verdicts, SLIPS, defender store and
+    the agent-manager session capture all land in the same ``outputs/<run_id>/``.
+    """
+    base = os.environ.get('RUN_ID') or topology_id
+    out = Path(OUTPUTS_HOST_PATH)
+    try:
+        if out.exists() and (out / base).exists():
+            base = f"{base}-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}"
+    except OSError:
+        pass
+    return base
+
+
 def generate_compose(topology, opencode_images=None):
     """Generate docker-compose configuration for the topology.
 
@@ -2456,6 +2557,15 @@ def generate_compose(topology, opencode_images=None):
                         If None, uses global OPENCODE_IMAGE for all
     """
     project_prefix = f"scl-topology-{topology['id']}"
+    # Single source of truth for this run's outputs dir. Unique per start
+    # (timestamp-suffixed if outputs/<base>/ already exists) so re-runs never
+    # overwrite. Stamped on every container's RUN_ID env + the .current_run
+    # marker so every consumer resolves the same id.
+    run_id = resolve_run_id(topology['id'])
+    try:
+        (Path(OUTPUTS_HOST_PATH) / ".current_run").write_text(run_id)
+    except OSError:
+        pass
     routers = topology.get('routers') or []
     if not routers:
         routers = defaultRouters()
@@ -2615,24 +2725,34 @@ def generate_compose(topology, opencode_images=None):
 
             # Conditional OpenCode configuration (ports, volumes, environment, healthcheck) only when agents present
             if host_has_agents:
-                # Mount the SCL shared modules directory and related files
-                # Use absolute path for images directory (mounted in container at /app/images)
-                scl_opencode_dir = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-plugin-network-topology-ubuntu-opencode'
+                # Agent scripts (host AGENTS_HOST_PATH) + the shared outputs dir (host, rw)
+                # for run-log persistence. The opencode shared modules (/opt/shared),
+                # entrypoint.sh and db_admin_opencode_client.py are BAKED INTO the
+                # scl-plugin-network-topology-ubuntu-opencode image (its Dockerfile COPYs
+                # them from this plugin's images dir), so topology hosts need NO host-path
+                # image bind mount — keeping them free of any host image-path dependency.
                 volumes = [
                     f'{AGENTS_HOST_PATH}:/app/agents:ro',
-                    f'{scl_opencode_dir}/shared:/opt/shared:ro',
-                    # Note: entrypoint.sh and db_admin_opencode_client.py are already in the ubuntu-opencode image
+                    # Persist agent run logs (timeline + opencode messages) to the shared
+                    # host outputs dir so they survive teardown and are Replay-readable.
+                    f'{OUTPUTS_HOST_PATH}:/outputs',
                 ]
                 service_config['volumes'] = volumes
 
-                # Modify host_script to include entrypoint at the beginning
+                # The ubuntu-24.04-opencode image has NO ENTRYPOINT, so the compose
+                # `command` below IS PID 1. We therefore launch the in-image
+                # /usr/local/bin/entrypoint.sh in the background: it brings up the
+                # guardrail runtime (127.0.0.1:4097, when GUARDRAIL_ENABLED=1) and the
+                # executor OpenCode serve (4096) + SSH, then idles on tail. We then
+                # wait for 4096 readiness and run the host_script (which writes the
+                # per-host opencode.json with tools.bash:false for guarded hosts).
                 entrypoint_setup = f'''
-# Start OpenCode server via entrypoint
+# Start OpenCode server via entrypoint (brings up 4097 guardrail + 4096 serve + SSH)
 bash /usr/local/bin/entrypoint.sh &
 ENTRYPOINT_PID=$$!
 
-# Wait for OpenCode server to start
-timeout=15
+# Wait for the OpenCode serve (started by entrypoint.sh) to be healthy.
+timeout=30
 while [ $$timeout -gt 0 ]; do
     if curl -s --connect-timeout 2 --max-time 3 http://localhost:4096/global/health | grep -q "healthy.*true"; then
         echo "OpenCode server is ready"
@@ -2642,9 +2762,9 @@ while [ $$timeout -gt 0 ]; do
     timeout=$$((timeout - 1))
 done
 
-# Continue with host setup
+# Continue with host setup (writes opencode.json + agent prompts, then idles).
 '''
-                # Replace the beginning of host_script with entrypoint setup
+                # Prepend the readiness wait to host_script.
                 service_config['command'] = ['sh', '-lc', entrypoint_setup + host_script(topology, network, host, host_index, gateway_ip)]
 
                 # Add SSH and compromised credentials environment variables
@@ -2657,13 +2777,50 @@ done
                     'LLM_MODEL': LLM_MODEL,
                     'SSH_COMPROMISED_USER': 'labuser',
                     'SSH_COMPROMISED_PASS': host.get('password', 'strato'),
+                    # Write run logs into the mounted /outputs so get_trident_base()
+                    # resolves there and logs persist + are aligned with SLIPS/defender.
+                    'TRIDENT_HOME': '/outputs',
+                    # RUN_ID selects the outputs/<RUN_ID>/ dir for run logs
+                    # (guardrail verdicts, SLIPS, per-agent opencode_api_messages).
+                    # Default to the topology id; override globally via RUN_ID in .env.
+                    'RUN_ID': run_id,
                 }
+
+                # Guardrail (auditor) configuration for guarded hosts only.
+                # The executor opencode (PID 1, entrypoint) reads these from the
+                # real container env to start a second opencode serve on 4097
+                # (loopback, NOT published) and place the global guardrail plugin.
+                # db_admin and other non-guarded hosts are left untouched.
+                host_agent_types = host_agents(host)
+                member_guarded = any(a in GUARDED_AGENTS for a in host_agent_types)
+                # Honor an explicit per-host guardrail_enabled flag from the
+                # frontend; absent (None) => auto (armed iff a guarded agent is
+                # present on the host).
+                host_guarded = host.get('guardrail_enabled') if host.get('guardrail_enabled') is not None else member_guarded
+                if host_guarded:
+                    if 'soc_god' in host_agent_types:
+                        guardrail_profile = 'defender'
+                    else:
+                        guardrail_profile = 'coder56'
+                    guardrail_goal_key = 'soc_god' if guardrail_profile == 'defender' else 'coder56'
+                    service_config['environment'].update({
+                        'GUARDRAIL_ENABLED': '1',
+                        'GUARDRAIL_PROFILE': guardrail_profile,
+                        'GUARDRAIL_GOAL': GUARDRAIL_GOALS.get(guardrail_goal_key, ''),
+                        'GUARDRAIL_HTTP_URL': 'http://127.0.0.1:4097',
+                    })
 
                 # OpenCode HTTP API port — internal only (not published to the host).
                 # Publishing host port 4096 for every agent host made multiple agents
                 # collide on the same host port; the agent-manager reaches OpenCode
                 # over scl-playground-net by container name instead.
                 service_config['expose'] = ['4096']
+
+                # Guardrail HTTP API — 127.0.0.1:4097 inside the container. It is
+                # loopback-only by construction (the entrypoint binds it to
+                # 127.0.0.1); we deliberately do NOT publish it. Exposing it on the
+                # internal docker network would let sibling containers reach the
+                # guardrail, so we omit it from `expose` entirely.
 
             compose['services'][service_name] = service_config
 
@@ -2678,11 +2835,11 @@ done
             'image': SLIPS_IMAGE,
             'container_name': f'{project_prefix}-slips-sensor',
             'cap_add': ['NET_ADMIN', 'NET_RAW'],
-            'volumes': [f'{pcaps_volume}:/pcaps'],
+            'volumes': [f'{pcaps_volume}:/pcaps', f'{OUTPUTS_HOST_PATH}:/outputs'],
             'networks': {'scl-playground-net': {}},
             'environment': {
                 'DEFENDER_URL': defender_url,
-                'RUN_ID': topology['id'],
+                'RUN_ID': run_id,
                 'PCAP_DIR': '/pcaps',
             },
             'labels': [
@@ -2873,13 +3030,40 @@ WORKDIR /opt/agents
 CMD ["/bin/bash"]
 """
 
-    result = subprocess.run(
-        ['docker', 'build', '-t', opencode_image, '-'],
-        input=dockerfile,
-        capture_output=True,
-        text=True,
-        check=False,
+    # --- Guardrail (coder56 / defender auditor) wiring -----------------------
+    # The generated Dockerfile above is piped on stdin with NO build context and
+    # uses a flaky `wget ... 2>/dev/null || ...` opencode install that silently
+    # leaves no binary; it also cannot share layer cache with the working static
+    # build, so topology hosts (ubuntu:24.04 -> ubuntu-24.04-opencode:0.1) ended
+    # up with no opencode AND no guardrail. For ubuntu/debian hosts the foundation
+    # IS SCL's BASE_IMAGE, which is exactly what the static
+    # images/scl-plugin-network-topology-ubuntu-opencode/ Dockerfile builds on
+    # (proven opencode install + labuser + the guardrail plugin + guardrail-aware
+    # entrypoint). Build THAT Dockerfile directly — cache-friendly and complete.
+    static_dir = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-plugin-network-topology-ubuntu-opencode'
+    use_static = (
+        foundation_image == BASE_IMAGE
+        and (static_dir / 'Dockerfile').is_file()
+        and (static_dir / 'guardrail' / 'guardrail.ts').is_file()
     )
+
+    if use_static:
+        print(f"   Using static opencode image Dockerfile (guardrail-ready): {static_dir}")
+        result = subprocess.run(
+            ['docker', 'build', '-t', opencode_image, str(static_dir)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    else:
+        # Non-SCL foundation (kali, etc.) -> generated Dockerfile, contextless stdin build.
+        result = subprocess.run(
+            ['docker', 'build', '-t', opencode_image, '-'],
+            input=dockerfile,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     if result.returncode != 0:
         error_msg = result.stderr or result.stdout or f'Failed to build {opencode_image}'

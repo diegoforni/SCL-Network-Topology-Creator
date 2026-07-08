@@ -8,6 +8,9 @@ services:
       - "${TOPOLOGY_PORT:-9004}:9002"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the outputs dir read-only so resolve_run_id can stat
+      # outputs/<run_id>/ for run-id uniqueness (no overwrite on re-run).
+      - ${OUTPUTS_HOST_PATH:-/tmp/outputs}:${OUTPUTS_HOST_PATH:-/tmp/outputs}:rw
       - ./data:/app/data
       # Mount shared directory - use environment variable or default
       - ${SHARED_DIR:-./shared}:/app/shared:ro
@@ -22,6 +25,13 @@ services:
       - PLUGIN_VERSION=2.0.0
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - OPENCODE_API_KEY=${OPENCODE_API_KEY}
+      # Host path bind-mounted into opencode + SLIPS topology containers so their
+      # run logs persist on the host (visible to the agent-manager's Replay).
+      # Must match the agent-manager's OUTPUTS_DIR host path.
+      - OUTPUTS_HOST_PATH=${OUTPUTS_HOST_PATH:-/tmp/outputs}
+      # Run id override for outputs/<RUN_ID>/. When set in .env, flows into
+      # topology container RUN_ID env + agent-manager session capture.
+      - RUN_ID=${RUN_ID:-}
     networks:
       - scl-playground-net
     restart: unless-stopped

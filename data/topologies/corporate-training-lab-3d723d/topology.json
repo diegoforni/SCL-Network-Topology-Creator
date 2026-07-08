@@ -4,6 +4,13 @@
   "infrastructure": {
     "hackerlab_network_id": "net1"
   },
+  "monitoring": {
+    "slips": {
+      "capture_source": "router1",
+      "defender_enabled": true,
+      "enabled": false
+    }
+  },
   "name": "Corporate training lab",
   "networks": [
     {
@@ -205,7 +212,7 @@
       "username": "admin"
     }
   ],
-  "updated_at": "2026-06-15T03:26:04Z",
+  "updated_at": "2026-07-06T23:52:31Z",
   "visual": {
     "networks": {},
     "routers": {}
