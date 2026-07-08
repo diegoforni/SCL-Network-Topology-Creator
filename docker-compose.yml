@@ -11,8 +11,11 @@ services:
       - ./data:/app/data
       # Mount shared directory - use environment variable or default
       - ${SHARED_DIR:-./shared}:/app/shared:ro
-      # Mount images directory - use environment variable or default
-      - ${IMAGES_DIR:-../../images}:/app/images:ro
+      # Mount this plugin's OWN images dir (self-contained: the Dockerfiles + sources
+      # for the opencode / SLIPS images are committed under ./images; there is no
+      # stratocyberlab-level images dir). Default ./images resolves on the host to
+      # plugins/network-topology/images — the same files the container reads at /app/images.
+      - ${IMAGES_DIR:-./images}:/app/images:ro
       - ./.env:/app/.env:ro
     environment:
       - PLUGIN_ID=network-topology
