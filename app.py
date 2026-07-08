@@ -2338,21 +2338,41 @@ def host_script(topology, network, host, host_index, gateway):
     else:
         print(f"ℹ️ No agents configured for host {host['name']}")
 
-    # Internet access configuration
+    # Internet access configuration.
+    # Hosts are dual-homed: their topology subnet + scl-playground-net. We keep the
+    # own subnet on-link, send the DEFAULT route to the playground for internet
+    # egress, and route every OTHER topology subnet via the router gateway so that
+    # inter-subnet traffic traverses the router (where SLIPS captures it) instead of
+    # leaking out the playground default to the Docker host (which has no path to the
+    # containers' topology addresses and makes cross-subnet targets show "filtered").
+    sibling_cidrs = [n['cidr'] for n in topology['networks'] if n.get('id') != network['id']]
+    sibling_routes = ''.join(
+        f'ip route replace {cidr} via {gateway} dev "$$topo_if" || true\n'
+        for cidr in sibling_cidrs
+    )
     internet_config = ''
     if network.get('internet'):
-        # For internet access, we use scl-playground-net's gateway (172.22.0.1)
-        # and add a specific route for the internal network via the router
+        # Detect interfaces by address: Docker's eth0/eth1 ordering is NOT guaranteed
+        # across dual-homed containers (topology subnet vs scl-playground-net swap per
+        # host), so identify the topology iface by the host's own IP and the playground
+        # iface as the other inet interface.
         internet_config = f'''
-# Configure internet access via scl-playground-net
-ip route replace default via 172.22.0.1 dev eth1 || true
-ip route replace {network['cidr']} dev eth0 || true
-# Configure DNS to use public DNS servers
+# Configure internet access via scl-playground-net + route sibling subnets via router
+topo_if="$$(ip -o -f inet addr show | awk -v ip='{ip_addr}' '$$2!="lo" && $$4 ~ ip"/" {{print $$2; exit}}')"
+pg_if="$$(ip -o -f inet addr show | awk -v t="$$topo_if" '$$2!="lo" && $$2!=t {{print $$2; exit}}')"
+pg_gw="$$(ip route show default dev "$$pg_if" 2>/dev/null | awk '{{print $$3; exit}}')"
+if [ -n "$$pg_gw" ]; then
+    ip route replace default via "$$pg_gw" dev "$$pg_if" || true
+fi
+# Own subnet stays on-link via the topology interface.
+ip route replace {network['cidr']} dev "$$topo_if" || true
+# Route every other topology subnet via the router gateway on this subnet.
+{sibling_routes}# Configure DNS to use public DNS servers
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 echo "nameserver 8.8.4.4" >> /etc/resolv.conf
 '''
     else:
-        # For isolated networks, use router as gateway
+        # For isolated networks, default via router (already routes sibling subnets).
         internet_config = f'ip route replace default via {gateway} || true'
 
     return f"""set -eu
@@ -2493,7 +2513,7 @@ table ip nat {
     # SLIPS capture: if this router is the monitoring capture_source, dump pcaps
     # (rotated every 30s, excluding the OpenCode API port) to /pcaps. Rotation
     # yields completed captures (cap_HHMMSS.pcap) that watch_pcaps will process;
-    # a single growing router.pcap would be skipped by the watcher.
+    # a single growing router.pcap would be skipped by the guardrail.
     slips_cfg = (topology.get('monitoring') or {}).get('slips') or {}
     capture_source = slips_cfg.get('capture_source') or ''
     is_capture_router = bool(slips_cfg.get('enabled')) and bool(capture_source) and (
@@ -2501,13 +2521,24 @@ table ip nat {
     )
     capture_block = (
         "mkdir -p /pcaps && "
-        "(tcpdump -i any -U -G 30 -W 20 -w '/pcaps/cap_%H%M%S.pcap' 'not port 4096' >/dev/null 2>&1 &) || true"
+        # Supervisor loop that keeps tcpdump alive for the life of the router.
+        # The router entrypoint runs under `set -eu`; errexit propagates into
+        # this subshell, so an UNGUARDED non-zero tcpdump exit tears down the
+        # whole loop and blinds the sensor (that is what previously killed
+        # capture for good after a single tcpdump exit). Run the subshell with
+        # `set +e` and guard tcpdump with `|| true` so the loop always restarts.
+        # Note: on tcpdump 4.99.x `-G 30` rotation is traffic-triggered (an idle
+        # interface never rotates) and `-W` does NOT make tcpdump self-exit, so
+        # the loop itself is what keeps capture running. Prune to the newest 40
+        # captures each cycle so the shared /pcaps volume stays bounded.
+        "( set +e; while true; do "
+        "ls -1t /pcaps/cap_*.pcap 2>/dev/null | tail -n +41 | xargs -r rm -f; "
+        "tcpdump -i any -U -G 30 -w '/pcaps/cap_%H%M%S.pcap' 'not port 4096' >/dev/null 2>&1 || true; "
+        "sleep 1; "
+        "done ) >/dev/null 2>&1 &"
         if is_capture_router else ''
     )
     return f"""set -eu
-sysctl -w net.ipv4.ip_forward=1 || true
-sysctl -w net.ipv4.conf.all.rp_filter=0 || true
-sysctl -w net.ipv4.conf.default.rp_filter=0 || true
 {route_block}
 {router_management_block(router)}
 wan_if="$(ip route show default | awk '{{print $$5; exit}}')"
@@ -2669,7 +2700,11 @@ def generate_compose(topology, opencode_images=None):
             'container_name': f'{project_prefix}-{service_name}',
             'hostname': router.get('name') or router_id,
             'cap_add': ['NET_ADMIN'],
-            'sysctls': {'net.ipv4.ip_forward': '1'},
+            'sysctls': {
+                'net.ipv4.ip_forward': '1',
+                'net.ipv4.conf.all.rp_filter': '0',
+                'net.ipv4.conf.default.rp_filter': '0',
+            },
             'command': ['sh', '-lc', router_script_text],
             'networks': router_networks,
             'labels': [
@@ -3249,8 +3284,60 @@ def start_topology(topology_id, force_rebuild=False):
     return {'status': 'started'}
 
 
+def cleanup_topology_networks(topology_id):
+    """Remove a topology's docker networks after ``compose down``.
+
+    ``docker compose down`` cannot delete a per-topology network while an
+    external endpoint is still attached to it. ``sync_hackerlab_runtime``
+    connects the shared ``scl-hackerlab`` container to one of the topology's
+    networks on start, and that container is not owned by the compose project,
+    so compose leaves the network behind. Stopped topologies then leak their
+    ``10.77.x`` networks and block any later topology that reuses the same
+    subnet (its start fails silently inside the background compose job).
+
+    Force-disconnect every attached endpoint and delete each network
+    explicitly. Idempotent and best-effort: a missing network or an individual
+    failure is swallowed so one bad network cannot abort cleanup of the rest.
+    """
+    path = topology_path(topology_id)
+    topology = read_json(path) if path.exists() else {}
+    removed = []
+    for network in topology.get('networks') or []:
+        network_id = network.get('id')
+        if not network_id:
+            continue
+        name = resolve_topology_network_name(topology_id, network_id)
+        try:
+            details = docker_inspect_json(['network', 'inspect', name]) or {}
+            # `docker network inspect` returns a JSON list; normalize to the
+            # single network dict so .get('Containers') works below.
+            if isinstance(details, list):
+                details = details[0] if details else {}
+        except Exception:
+            details = {}
+        for endpoint in (details.get('Containers') or {}).values():
+            endpoint_name = endpoint.get('Name')
+            if endpoint_name:
+                try:
+                    docker_run(['network', 'disconnect', '-f', name, endpoint_name])
+                except Exception:
+                    pass
+        try:
+            docker_run(['network', 'rm', name])
+            removed.append(name)
+        except Exception:
+            pass
+    return removed
+
+
 def stop_topology(topology_id):
-    run_compose(topology_id, ['down'])
+    try:
+        run_compose(topology_id, ['down'])
+    except Exception:
+        # Cleanup must still run even if compose down failed (e.g. the compose
+        # file was already removed); otherwise the topology's networks leak.
+        pass
+    cleanup_topology_networks(topology_id)
     return {'status': 'stopped'}
 
 
