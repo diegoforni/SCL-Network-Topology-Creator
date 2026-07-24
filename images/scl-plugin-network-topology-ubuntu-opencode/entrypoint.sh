@@ -157,7 +157,7 @@ if [[ "${GUARDRAIL_ENABLED:-0}" == "1" ]]; then
     # 3. Guardrail agent config (baked) -> where opencode actually reads it.
     #    opencode resolves its global config as $XDG_CONFIG_HOME/opencode/opencode.json
     #    (note the extra /opencode/ subdir) OR ~/.config/opencode/opencode.json (HOME-based).
-    #    Place it in BOTH locations so the guardrail serve loads gemma4 + the guardrail agents
+    #    Place it in BOTH locations so the guardrail serve loads glm-5.2 + the guardrail agents
     #    regardless of which path opencode consults; otherwise it falls back to the built-in
     #    default provider (opencode-go / qwen*) which is unconfigured and fails every prompt.
     if [[ -f /opt/guardrail/opencode-guardrail.json ]]; then

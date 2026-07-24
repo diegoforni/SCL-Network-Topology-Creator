@@ -48,6 +48,32 @@ RUN ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode
 COPY opencode.json /root/.config/opencode/opencode.json.template
 # Also copy as actual config (will be overridden by env vars)
 COPY opencode.json /root/.config/opencode/opencode.json
+# Markdown agents (coder56_lead coordinator + coder56_phase worker). opencode loads
+# ~/.config/opencode/agents/*.md alongside the JSON config, and these survive the
+# runtime topology Cmd that overwrites opencode.json with a coder56-only config —
+# so both topology-host and throwaway containers get the lead/phase agents from one
+# source. (The native_subagents orchestration mode uses these.)
+COPY agents/ /root/.config/opencode/agents/
+
+# Global AGENTS.md — opencode auto-loads ~/.config/opencode/AGENTS.md every session
+# (global rules). This is the agent's PERSISTENT long-term memory protocol: it points
+# the agent at the host-backed /outputs/agent-memory/MEMORY.md (mounted RW, survives
+# container teardown) and instructs it to read + append reusable findings there. The
+# runtime topology Cmd only overwrites opencode.json, NOT this file, so it persists.
+COPY AGENTS.md /root/.config/opencode/AGENTS.md
+
+# Bake the briiirussell/cybersecurity-skills into the global OpenCode skills dir.
+# These are Claude/opencode SKILL.md files; OpenCode discovers them on-demand via its
+# native `skill` tool from ~/.config/opencode/skills/<name>/SKILL.md (HOME=/root here),
+# so every agent on this serve (coder56, soc_god) can invoke them. Pinned to a commit
+# for reproducibility; refresh by changing CS_SKILLS_REF below.
+ARG CS_SKILLS_REF=c9ade0349f8ecd5c9c68a82a05d2b6012c5fa1d7
+RUN mkdir -p /root/.config/opencode/skills \
+    && curl -fsSL "https://github.com/briiirussell/cybersecurity-skills/archive/${CS_SKILLS_REF}.tar.gz" -o /tmp/cs.tgz \
+    && tar -xzf /tmp/cs.tgz -C /tmp \
+    && cp -r /tmp/cybersecurity-skills-*/skills/* /root/.config/opencode/skills/ \
+    && rm -rf /tmp/cs.tgz /tmp/cybersecurity-skills-* \
+    && echo "Installed $(find /root/.config/opencode/skills -name SKILL.md | wc -l) cybersecurity skills"
 
 # Copy entrypoint script
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
