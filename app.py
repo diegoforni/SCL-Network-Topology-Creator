@@ -82,6 +82,13 @@ TOPOLOGIES_DIR = DATA_DIR / 'topologies'
 BASE_IMAGE = 'scl-plugin-network-topology-ubuntu:0.1'
 OPENCODE_IMAGE = 'scl-plugin-network-topology-ubuntu-opencode:0.1'
 SLIPS_IMAGE = 'scl-slips-sensor:0.1'
+# Dedicated image for `repo-server` hosts — serves an entire external Git repo
+# (cloned at build time, see images/scl-repo-host/Dockerfile). Override the
+# cloned repo with the REPO_HOST_URL env var.
+REPO_HOST_IMAGE = 'scl-repo-host:0.1'
+REPO_HOST_URL = os.environ.get(
+    'REPO_HOST_URL', 'https://github.com/JuanLoncharich/accion_del_sur'
+)
 
 # Map of base OS images to their OpenCode-enabled variants
 # Built dynamically by ensure_opencode_images()
@@ -89,7 +96,7 @@ OPENCODE_IMAGES_CACHE = {}
 LLM_URL = os.environ.get('DASHBOARD_LLM_URL', 'http://dashboard/api/llm/chat')
 OPENCODE_API_KEY = os.environ.get('OPENCODE_API_KEY', '')
 LLM_URL_FULL = os.environ.get('LLM_URL', 'https://llm.ai.e-infra.cz/v1')
-LLM_MODEL = os.environ.get('LLM_MODEL', 'gemma4')
+LLM_MODEL = os.environ.get('LLM_MODEL', 'glm-5.2')
 AGENTS_HOST_PATH = os.environ.get('AGENTS_HOST_PATH', '/agent-scripts')
 # Host path bind-mounted (rw) into opencode + SLIPS topology containers so their
 # run logs persist on the host and are visible to the agent-manager's Replay.
@@ -134,6 +141,11 @@ HOST_TYPES = {
         'label': 'Log server',
         'ports': ['514/tcp'],
         'description': 'Host prepared with log files for investigation.',
+    },
+    'repo-server': {
+        'label': 'Repo server',
+        'ports': ['80/tcp', '3001/tcp', '3306/tcp'],
+        'description': 'Runs an external Git repo as a full-stack app (frontend on :80, Node API on :3001, MariaDB on :3306). Repo + config baked into the image at build time.',
     },
 }
 
@@ -2173,15 +2185,17 @@ def opencode_agent_block(host, topology):
     guarded = host.get('guardrail_enabled') if host.get('guardrail_enabled') is not None else member_guarded
     # tools_block is injected as a kwarg VALUE into the .format() template, so it
     # must use single braces (kwarg values are NOT re-escaped by .format). It is
-    # placed at the top level of the heredoc JSON to disable the built-in bash so
-    # the global guardrail plugin can re-register a custom "bash" forwarder. Empty
-    # string for non-guarded hosts -> generated JSON is unchanged for them.
+    # placed at the top level of the heredoc JSON to enable the skill/task tools
+    # (so OpenCode discovers ~/.config/opencode/skills/ and native subagents) and
+    # for guarded hosts to disable the built-in bash so the global guardrail plugin
+    # can re-register a custom "bash" forwarder.
+    tools_entries = ['    "skill": true', '    "task": true']
+    if guarded:
+        tools_entries.append('    "bash": false')
     tools_block = (
         '  "tools": {\n'
-        '    "bash": false\n'
-        '  },\n'
-        if guarded
-        else ''
+        + ',\n'.join(tools_entries)
+        + '\n  },\n'
     )
 
     # Build the agents section for OpenCode config
@@ -2196,7 +2210,8 @@ def opencode_agent_block(host, topology):
                 "default": "allow",
                 "bash": "allow",
                 "edit": "allow",
-                "write": "allow"
+                "write": "allow",
+                "external_directory": "allow"
             },
             "prompt": agent_configs.get(agent_type, 'You are a helpful assistant.')
         }
@@ -2257,12 +2272,20 @@ cat > /root/.config/opencode/opencode.json <<'OPENCODE_JSON'
             "context": 200000,
             "output": 65536
           }}
+        }},
+        "gemma4": {{
+          "name": "Gemma4",
+          "limit": {{
+            "context": 200000,
+            "output": 65536
+          }}
         }}
       }}
     }}
   }},
   "model": "e-infra-chat/{llm_model}",
   "autoupdate": true,
+  "subagent_depth": 2,
   "compaction": {{
     "auto": true,
     "prune": true
@@ -2277,6 +2300,12 @@ cat > /root/.config/opencode/opencode.json <<'OPENCODE_JSON'
     }},
     "write": {{
       "*": "allow"
+    }},
+    "external_directory": {{
+      "*": "allow",
+      "/tmp": "allow",
+      "/tmp/*": "allow",
+      "/tmp*": "allow"
     }}
   }},
   "agent": {agents_section}
@@ -2419,6 +2448,10 @@ def default_data_for_host(topology, network, host):
 def role_service_block(host_type):
     if host_type == 'web-server':
         return "printf '<h1>SCL web server</h1><pre>%s</pre>' \"$(cat /srv/scl-data/README.txt)\" > /srv/www/index.html\npython3 -m http.server 80 -d /srv/www &"
+    if host_type == 'repo-server':
+        # The full app stack (MariaDB + Node backend + nginx/frontend) is baked
+        # into the image; this supervisor brings it up. See repo-app-start.sh.
+        return "bash /usr/local/bin/repo-app-start.sh >/var/log/repo-app.log 2>&1 &"
     if host_type == 'file-server':
         return "python3 -m http.server 8080 -d /srv/files &"
     if host_type == 'db':
@@ -2732,8 +2765,12 @@ def generate_compose(topology, opencode_images=None):
             host_has_agents = bool(host_agents(host))
             host_base_image = host.get('image', 'ubuntu:24.04')
 
-            # Dynamic image selection: choose base image if no agents, OpenCode image if agents present
-            if host_has_agents:
+            # Dynamic image selection: repo-server hosts use the dedicated
+            # repo-host image (external repo baked in); agent hosts use their
+            # OpenCode variant; everything else uses the plain base image.
+            if host.get('type') == 'repo-server':
+                host_image = REPO_HOST_IMAGE
+            elif host_has_agents:
                 host_image = opencode_images.get(host_base_image, OPENCODE_IMAGE)
             else:
                 host_image = BASE_IMAGE
@@ -3053,7 +3090,7 @@ RUN echo "labuser ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/labuser && \\
 # Copy OpenCode configuration file with {{env:}} placeholders
 # This is a fallback config - opencode_agent_block will override with selected agents
 # OpenCode will substitute {{env:VAR_NAME}} with actual environment variable values
-RUN printf '{{\\n  "$schema": "https://opencode.ai/config.json",\\n  "provider": {{\\n    "e-infra-chat": {{\\n      "npm": "@ai-sdk/openai-compatible",\\n      "name": "e-INFRA CZ Chat API",\\n      "options": {{\\n        "baseURL": "{{{{env:LLM_URL}}}}",\\n        "apiKey": "{{{{env:OPENCODE_API_KEY}}}}"\\n      }},\\n      "models": {{\\n        "gemma4": {{\\n          "name": "Gemma4",\\n          "limit": {{\\n            "context": 200000,\\n            "output": 65536\\n          }}\\n        }}\\n      }}\\n    }}\\n  }},\\n  "model": "e-infra-chat/gemma4",\\n  "autoupdate": true,\\n  "permission": {{\\n    "default": "allow",\\n    "bash": {{ "*": "allow" }},\\n    "edit": {{ "*": "allow" }},\\n    "write": {{ "*": "allow" }}\\n  }}\\n}}\\n' > /root/.config/opencode/opencode.json
+RUN printf '{{\\n  "$schema": "https://opencode.ai/config.json",\\n  "provider": {{\\n    "e-infra-chat": {{\\n      "npm": "@ai-sdk/openai-compatible",\\n      "name": "e-INFRA CZ Chat API",\\n      "options": {{\\n        "baseURL": "{{{{env:LLM_URL}}}}",\\n        "apiKey": "{{{{env:OPENCODE_API_KEY}}}}"\\n      }},\\n      "models": {{\\n        "glm-5.2": {{\\n          "name": "GLM-5.2",\\n          "limit": {{\\n            "context": 200000,\\n            "output": 65536\\n          }}\\n        }}\\n      }}\\n    }}\\n  }},\\n  "model": "e-infra-chat/glm-5.2",\\n  "autoupdate": true,\\n  "subagent_depth": 2,\\n  "tools": {{\\n    "skill": true,\\n    "task": true\\n  }},\\n  "permission": {{\\n    "default": "allow",\\n    "bash": {{ "*": "allow" }},\\n    "edit": {{ "*": "allow" }},\\n    "write": {{ "*": "allow" }}\\n  }}\\n}}\\n' > /root/.config/opencode/opencode.json
 
 # Expose OpenCode HTTP API port
 EXPOSE 4096
@@ -3218,6 +3255,41 @@ def ensure_slips_image(topology):
     print(f"✅ Built SLIPS image: {SLIPS_IMAGE}")
 
 
+def ensure_repo_image(topology, force_rebuild=False):
+    """Build the repo-host image if any host is a `repo-server`.
+
+    The image bakes in an external Git repo (cloned at build time by the daemon,
+    so the topology host needs no runtime egress and the third-party repo is
+    never vendored into this plugin). Mirrors ensure_slips_image's build-from-
+    context pattern; the cloned repo URL comes from the REPO_HOST_URL env var.
+    """
+    has_repo_host = any(
+        host.get('type') == 'repo-server'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_repo_host:
+        return
+
+    if not force_rebuild:
+        result = subprocess.run(['docker', 'image', 'inspect', REPO_HOST_IMAGE], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ Repo-host image exists: {REPO_HOST_IMAGE}")
+            return
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-repo-host'
+    if not context.exists():
+        raise RuntimeError(f'Repo-host image build context not found: {context}')
+    print(f"🔨 Building repo-host image: {REPO_HOST_IMAGE} from {context} (repo: {REPO_HOST_URL})")
+    build = subprocess.run(
+        ['docker', 'build', '--build-arg', f'REPO_HOST_URL={REPO_HOST_URL}', '-t', REPO_HOST_IMAGE, str(context)],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {REPO_HOST_IMAGE}')
+    print(f"✅ Built repo-host image: {REPO_HOST_IMAGE}")
+
+
 def compose_project_name(topology_id):
     return f'scl-topology-{topology_id}'
 
@@ -3270,6 +3342,7 @@ def start_topology(topology_id, force_rebuild=False):
 
     opencode_images = ensure_opencode_images(topology, force_rebuild=force_rebuild)
     ensure_slips_image(topology)
+    ensure_repo_image(topology, force_rebuild=force_rebuild)
 
     compose = generate_compose(topology, opencode_images)
     with open(compose_path(topology_id), 'w', encoding='utf8') as file:
