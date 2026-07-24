@@ -132,3 +132,18 @@ dmypy.json
 /data/topologies/ditest*/
 /data/topologies/frontend-create-test*/
 /data/topologies/*-retest*/
+/data/topologies/block-*/
+/data/topologies/ds-burst-*/
+/data/topologies/ds-eval-*/
+/data/topologies/ds-gen-*/
+
+# repo-server host: the external repo (e.g. accion_del_sur) is cloned at IMAGE
+# BUILD time by the Docker daemon (see images/scl-repo-host/Dockerfile), so the
+# third-party content is never committed here. This also guards against any
+# local clone of that repo ever landing in the build context and being pushed.
+# backend.env holds the app's runtime secrets (DB password, JWT, Stellar keys) —
+# it is COPY'd into the image only and must NEVER be pushed.
+/images/scl-repo-host/repo/
+/images/scl-repo-host/.env
+/images/scl-repo-host/backend.env
+/images/scl-repo-host/*.env
