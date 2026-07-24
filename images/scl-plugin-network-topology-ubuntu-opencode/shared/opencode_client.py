@@ -292,7 +292,7 @@ class OpenCodeClient:
     def summarize_session(
         self, session_id: str,
         provider_id: str = "e-infra-chat",
-        model_id: str = "gemma4"
+        model_id: str = "glm-5.2"
     ) -> bool:
         """Ask the OpenCode server to compress a session's history in-place.
 

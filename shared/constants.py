@@ -144,7 +144,7 @@ ENV_AGENTS_HOST_PATH = "AGENTS_HOST_PATH"
 DEFAULT_TOPOLOGY_DATA_DIR = "/app/data"
 DEFAULT_LLM_URL = "http://dashboard/api/llm/chat"
 DEFAULT_LLM_URL_FULL = "https://llm.ai.e-infra.cz/v1"
-DEFAULT_LLM_MODEL = "gemma4"
+DEFAULT_LLM_MODEL = "glm-5.2"
 DEFAULT_AGENTS_HOST_PATH = "/agent-scripts"
 
 # Topology file names
