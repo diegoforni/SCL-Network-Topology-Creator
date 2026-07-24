@@ -613,7 +613,7 @@ export async function runToIdle(
 // ---------------------------------------------------------------------------
 // Convenience: extract the last assistant text from a messages array.
 // (The guardrail plugin needs this to find the strict JSON verdict the guardrail
-//  agent emits. Defensive against gemma4's occasional malformed tool-call text.)
+//  agent emits. Defensive against glm-5.2's occasional malformed tool-call text.)
 // ---------------------------------------------------------------------------
 export function getLastAssistantText(
   messages: ApiMessage[] | null | undefined,
