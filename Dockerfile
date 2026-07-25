@@ -12,8 +12,10 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
-COPY app.py .
+# Copy application files. The plugin is split across flat modules
+# (app.py = config registry + re-export hub; helpers/store/netmath/jobs/llm/
+# scripts/images/compose/docker_ops/topology_model/http_handlers/server.py).
+COPY *.py ./
 COPY shared/ ./shared/
 COPY templates/ ./templates/
 COPY static/ ./static/
