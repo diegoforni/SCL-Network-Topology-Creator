@@ -1,0 +1,161 @@
+{
+  "networks": {
+    "scl-playground-net": {
+      "external": true,
+      "name": "scl-playground-net"
+    },
+    "topo_dmz": {
+      "internal": false,
+      "ipam": {
+        "config": [
+          {
+            "subnet": "10.77.10.0/24"
+          }
+        ]
+      },
+      "name": "scl-topology-two-router-dmz"
+    },
+    "topo_int": {
+      "internal": true,
+      "ipam": {
+        "config": [
+          {
+            "subnet": "10.77.20.0/24"
+          }
+        ]
+      },
+      "name": "scl-topology-two-router-int"
+    },
+    "transit_r1_r2": {
+      "internal": true,
+      "ipam": {
+        "config": [
+          {
+            "subnet": "10.250.1.0/29"
+          }
+        ]
+      },
+      "name": "scl-topology-two-router-transit_r1_r2"
+    }
+  },
+  "services": {
+    "dmz-w": {
+      "cap_add": [
+        "NET_ADMIN"
+      ],
+      "command": [
+        "sh",
+        "-lc",
+        "set -eu\n# Configure internet access via scl-playground-net + route sibling subnets via router\ntopo_if=\"$$(ip -o -f inet addr show | awk -v ip='10.77.10.11' '$$2!=\"lo\" && $$4 ~ ip\"/\" {print $$2; exit}')\"\npg_if=\"$$(ip -o -f inet addr show | awk -v t=\"$$topo_if\" '$$2!=\"lo\" && $$2!=t {print $$2; exit}')\"\npg_gw=\"$$(ip route show default dev \"$$pg_if\" 2>/dev/null | awk '{print $$3; exit}')\"\nif [ -n \"$$pg_gw\" ]; then\n    ip route replace default via \"$$pg_gw\" dev \"$$pg_if\" || true\nfi\n# Own subnet stays on-link via the topology interface.\nip route replace 10.77.10.0/24 dev \"$$topo_if\" || true\n# Route every other topology subnet via the router gateway on this subnet.\nip route replace 10.77.20.0/24 via 10.77.10.254 dev \"$$topo_if\" || true\n# Configure DNS to use public DNS servers\necho \"nameserver 8.8.8.8\" > /etc/resolv.conf\necho \"nameserver 8.8.4.4\" >> /etc/resolv.conf\nmkdir -p /srv/scl-data /srv/www /srv/files /srv/db /var/log/scl /tmp/agents\ncat > /etc/scl-host.json <<'JSON'\n{\n  \"topology\": \"Two Router\",\n  \"network\": \"dmz\",\n  \"host\": \"dmz-1\",\n  \"role\": \"Web server\",\n  \"ip\": \"10.77.10.11\"\n}\nJSON\ncat > /srv/scl-data/README.txt <<'DATA'\nTopology: Two Router\nNetwork: dmz\nHost: dmz-1\nRole: Web server\nNo AI-generated data was requested for this host.\n\nDATA\ncp /srv/scl-data/README.txt /srv/www/index.txt || true\ncp /srv/scl-data/README.txt /srv/files/share.txt || true\nprintf '<h1>SCL web server</h1><pre>%s</pre>' \"$(cat /srv/scl-data/README.txt)\" > /srv/www/index.html\npython3 -m http.server 80 -d /srv/www &\n\n\ntouch /tmp/scl-host-init-ready\ntail -f /dev/null\n"
+      ],
+      "container_name": "scl-topology-two-router-dmz-w",
+      "hostname": "dmz-1",
+      "image": "scl-plugin-network-topology-ubuntu:0.1",
+      "labels": [
+        "scl.plugin=network-topology",
+        "scl.topology=two-router",
+        "scl.network=dmz",
+        "scl.host=w",
+        "scl.host_type=web-server",
+        "scl.has_agents=false"
+      ],
+      "networks": {
+        "scl-playground-net": {},
+        "topo_dmz": {
+          "ipv4_address": "10.77.10.11"
+        }
+      }
+    },
+    "int-b": {
+      "cap_add": [
+        "NET_ADMIN"
+      ],
+      "command": [
+        "sh",
+        "-lc",
+        "set -eu\nip route replace default via 10.77.20.254 || true\nmkdir -p /srv/scl-data /srv/www /srv/files /srv/db /var/log/scl /tmp/agents\ncat > /etc/scl-host.json <<'JSON'\n{\n  \"topology\": \"Two Router\",\n  \"network\": \"int\",\n  \"host\": \"int-1\",\n  \"role\": \"Jump box\",\n  \"ip\": \"10.77.20.11\"\n}\nJSON\ncat > /srv/scl-data/README.txt <<'DATA'\nTopology: Two Router\nNetwork: int\nHost: int-1\nRole: Jump box\nNo AI-generated data was requested for this host.\n\nDATA\ncp /srv/scl-data/README.txt /srv/www/index.txt || true\ncp /srv/scl-data/README.txt /srv/files/share.txt || true\n:\n\n\ntouch /tmp/scl-host-init-ready\ntail -f /dev/null\n"
+      ],
+      "container_name": "scl-topology-two-router-int-b",
+      "hostname": "int-1",
+      "image": "scl-plugin-network-topology-ubuntu:0.1",
+      "labels": [
+        "scl.plugin=network-topology",
+        "scl.topology=two-router",
+        "scl.network=int",
+        "scl.host=b",
+        "scl.host_type=jump-box",
+        "scl.has_agents=false"
+      ],
+      "networks": {
+        "scl-playground-net": {},
+        "topo_int": {
+          "ipv4_address": "10.77.20.11"
+        }
+      }
+    },
+    "router-r1": {
+      "cap_add": [
+        "NET_ADMIN"
+      ],
+      "command": [
+        "sh",
+        "-lc",
+        "set -eu\n:\n\nwan_if=\"$(ip route show default | awk '{print $$5; exit}')\"\ncat > /tmp/router-rules.nft <<EOF\nflush ruleset\ntable inet filter {\n  chain forward {\n    type filter hook forward priority 0; policy drop;\n    ct state established,related accept\n    iifname \"lo\" accept\n    ip saddr 10.77.10.0/24 oifname \"$$wan_if\" accept\n    ip saddr 10.250.1.0/29 oifname \"$$wan_if\" accept\n  }\n}\n\ntable ip nat {\n  chain postrouting {\n    type nat hook postrouting priority srcnat; policy accept;\n    oifname \"$$wan_if\" masquerade\n  }\n}\nEOF\nnft -f /tmp/router-rules.nft || true\n\n    tail -f /dev/null\n"
+      ],
+      "container_name": "scl-topology-two-router-router-r1",
+      "hostname": "core",
+      "image": "scl-plugin-network-topology-ubuntu:0.1",
+      "labels": [
+        "scl.plugin=network-topology",
+        "scl.topology=two-router",
+        "scl.router=r1"
+      ],
+      "networks": {
+        "scl-playground-net": {},
+        "topo_dmz": {
+          "ipv4_address": "10.77.10.254"
+        },
+        "topo_int": {
+          "ipv4_address": "10.77.20.254"
+        },
+        "transit_r1_r2": {
+          "ipv4_address": "10.250.1.2"
+        }
+      },
+      "sysctls": {
+        "net.ipv4.conf.all.rp_filter": "0",
+        "net.ipv4.conf.default.rp_filter": "0",
+        "net.ipv4.ip_forward": "1"
+      }
+    },
+    "router-r2": {
+      "cap_add": [
+        "NET_ADMIN"
+      ],
+      "command": [
+        "sh",
+        "-lc",
+        "set -eu\nip route replace default via 10.250.1.2 || true\n\nwan_if=\"$(ip route show default | awk '{print $$5; exit}')\"\ncat > /tmp/router-rules.nft <<EOF\nflush ruleset\ntable inet filter {\n  chain forward {\n    type filter hook forward priority 0; policy drop;\n    ct state established,related accept\n    iifname \"lo\" accept\n    counter drop\n  }\n}\nEOF\nnft -f /tmp/router-rules.nft || true\n\n    tail -f /dev/null\n"
+      ],
+      "container_name": "scl-topology-two-router-router-r2",
+      "hostname": "edge",
+      "image": "scl-plugin-network-topology-ubuntu:0.1",
+      "labels": [
+        "scl.plugin=network-topology",
+        "scl.topology=two-router",
+        "scl.router=r2"
+      ],
+      "networks": {
+        "scl-playground-net": {},
+        "transit_r1_r2": {
+          "ipv4_address": "10.250.1.3"
+        }
+      },
+      "sysctls": {
+        "net.ipv4.conf.all.rp_filter": "0",
+        "net.ipv4.conf.default.rp_filter": "0",
+        "net.ipv4.ip_forward": "1"
+      }
+    }
+  }
+}

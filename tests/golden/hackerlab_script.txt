@@ -1,0 +1,3 @@
+set -eu
+ip route replace default via 10.77.1.254 || true
+exec /root/.start-container.sh

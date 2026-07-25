@@ -1,0 +1,40 @@
+set -eu
+# Configure internet access via scl-playground-net + route sibling subnets via router
+topo_if="$$(ip -o -f inet addr show | awk -v ip='10.77.1.10' '$$2!="lo" && $$4 ~ ip"/" {print $$2; exit}')"
+pg_if="$$(ip -o -f inet addr show | awk -v t="$$topo_if" '$$2!="lo" && $$2!=t {print $$2; exit}')"
+pg_gw="$$(ip route show default dev "$$pg_if" 2>/dev/null | awk '{print $$3; exit}')"
+if [ -n "$$pg_gw" ]; then
+    ip route replace default via "$$pg_gw" dev "$$pg_if" || true
+fi
+# Own subnet stays on-link via the topology interface.
+ip route replace 10.77.1.0/24 dev "$$topo_if" || true
+# Route every other topology subnet via the router gateway on this subnet.
+# Configure DNS to use public DNS servers
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 8.8.4.4" >> /etc/resolv.conf
+mkdir -p /srv/scl-data /srv/www /srv/files /srv/db /var/log/scl /tmp/agents
+cat > /etc/scl-host.json <<'JSON'
+{
+  "topology": "Test Lab",
+  "network": "Net One",
+  "host": "host1",
+  "role": "Web server",
+  "ip": "10.77.1.10"
+}
+JSON
+cat > /srv/scl-data/README.txt <<'DATA'
+Topology: Test Lab
+Network: Net One
+Host: host1
+Role: Web server
+No AI-generated data was requested for this host.
+
+DATA
+cp /srv/scl-data/README.txt /srv/www/index.txt || true
+cp /srv/scl-data/README.txt /srv/files/share.txt || true
+printf '<h1>SCL web server</h1><pre>%s</pre>' "$(cat /srv/scl-data/README.txt)" > /srv/www/index.html
+python3 -m http.server 80 -d /srv/www &
+
+
+touch /tmp/scl-host-init-ready
+tail -f /dev/null

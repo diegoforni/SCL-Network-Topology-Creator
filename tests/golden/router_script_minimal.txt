@@ -1,0 +1,25 @@
+set -eu
+:
+
+wan_if="$(ip route show default | awk '{print $$5; exit}')"
+cat > /tmp/router-rules.nft <<EOF
+flush ruleset
+table inet filter {
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+    ct state established,related accept
+    iifname "lo" accept
+    ip saddr 10.77.1.0/24 oifname "$$wan_if" accept
+  }
+}
+
+table ip nat {
+  chain postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "$$wan_if" masquerade
+  }
+}
+EOF
+nft -f /tmp/router-rules.nft || true
+
+    tail -f /dev/null

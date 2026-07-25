@@ -1,0 +1,5 @@
+Topology: Test Lab
+Network: Net One
+Host: host1
+Role: Web server
+No AI-generated data was requested for this host.
