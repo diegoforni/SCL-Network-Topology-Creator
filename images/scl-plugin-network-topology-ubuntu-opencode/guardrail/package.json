@@ -2,9 +2,12 @@
   "name": "sclt-guardrail-plugin",
   "version": "1.0.0",
   "private": true,
-  "description": "SCLT executor-side opencode plugin (guardrail 'bash' forwarder). Local plugins may import @opencode-ai/plugin only when a package.json exists in the config dir; this file is copied next to guardrail.ts by the plugin-placement step so the typed import resolves.",
+  "description": "SCLT executor-side OpenCode guardrail tests and development dependencies.",
   "type": "module",
+  "scripts": {
+    "test": "bun test judge_lock.test.ts"
+  },
   "dependencies": {
-    "@opencode-ai/plugin": "*"
+    "@opencode-ai/plugin": "1.18.3"
   }
 }

@@ -9,8 +9,12 @@ LABEL description="SCL Network Topology Plugin with OpenCode support"
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-server shadow \
     && rm -rf /var/lib/apt/lists/* 2>/dev/null || true
 
-# Install OpenCode
-RUN curl -fsSL https://opencode.ai/install | bash
+# Pin OpenCode to the plugin API version verified by this image. The installer
+# supports --version; assert the resulting binary so a bad/stale download cannot
+# silently produce a different runtime.
+ARG OPENCODE_VERSION=1.18.3
+RUN curl -fsSL https://opencode.ai/install | bash -s -- --version "${OPENCODE_VERSION}" \
+    && test "$(/root/.opencode/bin/opencode --version)" = "${OPENCODE_VERSION}"
 
 # Add OpenCode bin directory to PATH
 ENV PATH="/root/.opencode/bin:${PATH}"

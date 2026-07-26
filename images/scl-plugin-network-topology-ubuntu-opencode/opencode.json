@@ -27,7 +27,7 @@
     }
   },
   "model": "e-infra-chat/glm-5.2",
-  "autoupdate": true,
+  "autoupdate": false,
   "subagent_depth": 2,
   "compaction": {
     "auto": true,
@@ -36,37 +36,10 @@
   "tools": {
     "skill": true,
     "task": true,
-    "bash": false
+    "bash": true
   },
   "permission": {
     "default": "allow",
-    "bash": {
-      "*": "allow",
-      "ls /tmp*": "allow",
-      "ls /tmp/*": "allow",
-      "ls -la /tmp*": "allow",
-      "ls -la /tmp/*": "allow",
-      "cat /tmp/*": "allow",
-      "cat /tmp*": "allow",
-      "find /tmp*": "allow",
-      "find /tmp/*": "allow",
-      "grep /tmp*": "allow",
-      "grep -r /tmp*": "allow",
-      "tail /tmp/*": "allow",
-      "head /tmp/*": "allow",
-      "rm /tmp/*": "allow",
-      "kill *": "allow",
-      "killall *": "allow",
-      "ps aux*": "allow",
-      "ps -ef*": "allow",
-      "netstat*": "allow",
-      "ss *": "allow",
-      "iptables*": "allow",
-      "iptables -L*": "allow",
-      "iptables -A*": "allow",
-      "iptables -D*": "allow",
-      "iptables -F*": "allow"
-    },
     "edit": {
       "*": "allow",
       "/tmp/*": "allow",
