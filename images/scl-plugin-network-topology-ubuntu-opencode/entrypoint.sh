@@ -119,18 +119,44 @@ chmod 600 /home/labuser/.ssh/config
 # Re-assert default route in case container networking reset it.
 ip route replace default via 172.30.0.1 dev eth0 || true
 
+# Run the compose-supplied host initializer before either OpenCode process
+# starts. It writes the final per-host opencode.json/auth.json and then touches
+# /tmp/scl-host-init-ready before idling. This removes the startup race where
+# the executor loaded the baked template and only later saw its real agent/tool
+# configuration.
+AGENT_SCRIPT_PID=""
+if [ $# -gt 0 ]; then
+    rm -f /tmp/scl-host-init-ready
+    "$@" &
+    AGENT_SCRIPT_PID=$!
+    for _ in $(seq 1 90); do
+        if [[ -f /tmp/scl-host-init-ready ]]; then
+            echo "✅ Host initializer ready; starting OpenCode runtimes"
+            break
+        fi
+        if ! kill -0 "${AGENT_SCRIPT_PID}" >/dev/null 2>&1; then
+            echo "⚠️  Host initializer exited before readiness; continuing fail-safe"
+            break
+        fi
+        sleep 0.5
+    done
+    if [[ ! -f /tmp/scl-host-init-ready ]]; then
+        echo "⚠️  Host initializer readiness marker absent after 45s; continuing with current config"
+    fi
+fi
+
 # --- GUARDRAIL runtime (Option B: second opencode serve on 127.0.0.1:4097) ---
 # IMPORTANT: the guardrail runtime MUST be brought up BEFORE the executor opencode
 # serve (4096) starts. opencode loads ~/.config/opencode/plugins/*.ts only at
 # process startup; if the executor serve is launched first, the global plugin
-# (guardrail.ts) is not yet in place, the custom "bash" forwarder never registers,
+# (guardrail.ts) is not yet in place, the before-execute hook never registers,
 # and the whole guardrail mechanism is silently inert. So: place the plugin, start
 # the 4097 serve, wait for readiness, and only THEN start the 4096 serve below.
 #
-# The executor (4096) loads the global plugin (guardrail.ts) which registers a custom
-# "bash" tool that forwards non-trivial commands to the guardrail agent. The guardrail
-# runs isolated (separate XDG_CONFIG_HOME/HOME) so it does NOT load the plugin and
-# keeps its own real bash. Only enabled when GUARDRAIL_ENABLED=1.
+# The executor (4096) loads the global plugin (guardrail.ts), which intercepts the
+# built-in bash through tool.execute.before. The guardrail runs isolated (separate
+# XDG_CONFIG_HOME/HOME), so it does NOT load the plugin and keeps its own real bash.
+# Only enabled when GUARDRAIL_ENABLED=1.
 GUARDRAIL_PID=""
 if [[ "${GUARDRAIL_ENABLED:-0}" == "1" ]]; then
     echo "👁  GUARDRAIL_ENABLED=1: bringing up guardrail runtime..."
@@ -144,14 +170,20 @@ if [[ "${GUARDRAIL_ENABLED:-0}" == "1" ]]; then
     #    executor plugin (and recurse into itself).
     rm -rf /root/.guardrail-config/plugins   # guarantee isolation
     mkdir -p /root/.guardrail-config
+    # Remove known stale layouts from prior image revisions. The production
+    # packaging model is one top-level plugin entry plus dependencies under lib/.
+    rm -f /root/.config/opencode/plugins/guardrail.ts \
+        /root/.config/opencode/plugins/guardrail_client.ts \
+        /root/.config/opencode/plugins/guardrail_client.ts.bak \
+        /root/.config/opencode/plugins/package.json \
+        /root/.config/opencode/plugins/package.json.bak
+    rm -rf /root/.config/opencode/plugins/lib
     if [[ -f /opt/guardrail/guardrail.ts ]]; then
         cp /opt/guardrail/guardrail.ts /root/.config/opencode/plugins/guardrail.ts
     fi
-    if [[ -f /opt/guardrail/guardrail_client.ts ]]; then
-        cp /opt/guardrail/guardrail_client.ts /root/.config/opencode/plugins/guardrail_client.ts
-    fi
-    if [[ -f /opt/guardrail/package.json ]]; then
-        cp /opt/guardrail/package.json /root/.config/opencode/plugins/package.json
+    if [[ -f /opt/guardrail/judge_lock.ts ]]; then
+        mkdir -p /root/.config/opencode/plugins/lib
+        cp /opt/guardrail/judge_lock.ts /root/.config/opencode/plugins/lib/judge_lock.ts
     fi
 
     # 3. Guardrail agent config (baked) -> where opencode actually reads it.
@@ -208,20 +240,6 @@ echo "Starting OpenCode HTTP server on 0.0.0.0:4096..."
 cd /tmp && opencode serve --hostname 0.0.0.0 --port 4096 >>"${opencode_log}" 2>&1 &
 OPENCODE_PID=$!
 echo "✅ OpenCode serve started (PID ${OPENCODE_PID})"
-
-# Run the compose-supplied command if present. The Dockerfile ENTRYPOINT is
-# /usr/local/bin/entrypoint.sh (this script) and compose only sets `command:`
-# (no entrypoint: override), so the command arrives as "$@". Earlier this script
-# ended with `exec tail -f /dev/null` and dropped "$@" on the floor, which meant
-# the host_script + opencode_agent_block (which writes opencode.json with
-# tools.bash:false for guarded hosts) NEVER ran. We now invoke the passed command
-# in the background and block on wait so PID 1 stays alive. When no command is
-# supplied we idle on `tail -f /dev/null` for backward compatibility.
-AGENT_SCRIPT_PID=""
-if [ $# -gt 0 ]; then
-    "$@" &
-    AGENT_SCRIPT_PID=$!
-fi
 
 # Cleanup trap: kill both serves (and the agent script) on EXIT/INT/TERM.
 cleanup() {

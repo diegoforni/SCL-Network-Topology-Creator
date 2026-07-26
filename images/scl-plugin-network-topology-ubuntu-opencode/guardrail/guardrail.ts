@@ -1,10 +1,10 @@
 /**
  * guardrail.ts — EXECUTOR-SIDE global opencode plugin (the "ClawKeeper" forwarder).
  *
- * Loaded by the EXECUTOR opencode serve (port 4096). It DISABLES the built-in
- * bash (via opencode.json `tools: { bash: false }`) and registers a CUSTOM tool
- * also named "bash". The custom tool's execute() return value IS the result the
- * executor model sees (result substitution by construction — no MCP, no fork).
+ * Loaded by the EXECUTOR opencode serve (port 4096). It intercepts the built-in
+ * bash tool through `tool.execute.before`, adjudicates and (when authorized)
+ * executes the original command inside the guardrail path, then rewrites the
+ * built-in invocation to a harmless printf of the captured result.
  *
  * Tiered behavior:
  *   1. GUARDRAIL_ENABLED != "1"             -> pass-through: run via $, return real result.
@@ -36,43 +36,817 @@
  *     session id) so the guardrail keeps context across turns.
  *   - Verdicts persisted to /outputs/<RUN_ID>/guardrail/verdicts.ndjson (best-effort).
  *
- * Verified against opencode 1.17.9 plugin API (https://opencode.ai/docs/plugins):
- *   import { type Plugin, tool } from "@opencode-ai/plugin"
- *   tool({ description, args: { command: tool.schema.string() },
- *         async execute(args, context) { ... return <string> })
- *
- * NOTE on the typed import: a local plugin may import @opencode-ai/plugin ONLY if a
- * package.json exists in the config dir. We ship guardrail/package.json declaring the
- * dependency (the plugin-placement step copies it next to guardrail.ts). If the typed
- * import is unavailable for any reason, the code is written so that removing the type
- * import and the `: Plugin` annotation still yields a working plain plugin function —
- * the runtime shape is identical.
+ * Verified against OpenCode 1.18.3: the generic built-in tool wrapper invokes
+ * `tool.execute.before` with `{ tool, sessionID, callID }` and mutable
+ * `{ args }` immediately before the built-in tool executes.
  */
 
-// Typed import. If the package is missing at runtime the types simply vanish; the
-// plugin still loads because we do not use any runtime export from this module
-// except `tool` (which is a build-time helper). To be fully zero-dependency-safe we
-// also accept a plain-function fallback below.
-import { tool } from "@opencode-ai/plugin"
-import type { Plugin } from "@opencode-ai/plugin"
 // node:fs for reading the operator-forwarded live goal + mode files, and writing
 // human-in-the-loop approval requests (Bun supports node:fs).
 import { readFileSync, writeFileSync, renameSync, existsSync, readdirSync } from "node:fs"
 
+function verificationMarker(path: string, message: string): void {
+  if (process.env.GUARDRAIL_VERIFY_MARKERS !== "1") return
+  const line = `${new Date().toISOString()} pid=${process.pid} ${message}\n`
+  try {
+    writeFileSync(path, line, { flag: "a" })
+  } catch {
+    /* verification-only marker; never affect the gate */
+  }
+  try {
+    console.error(`[guardrail] ${message}`)
+  } catch {
+    /* verification-only console marker */
+  }
+}
+
 // Local HTTP client wrapper around the OpenCode REST API on 4097
 // (port of shared/opencode_client.py — POST /session, /session/{id}/prompt_async,
 //  GET /session/status, GET /session/{id}/message, POST /session/{id}/abort).
-// guardrail_client.ts is a dependency-free module of free functions; it has no class
-// and no Verdict type — the Verdict contract below is owned by THIS plugin.
-import {
-  createSession as wcCreateSession,
-  promptSync as wcPromptSync,
-  abortSession as wcAbortSession,
-  getMessages as wcGetMessages,
-  getLastAssistantText as wcGetLastAssistantText,
-  getSessionStatus as wcGetSessionStatus,
-  type ApiMessage,
-} from "./guardrail_client"
+// ===========================================================================
+// guardrail_client.ts INLINED — dependency-free HTTP client for the guardrail
+// judge on 127.0.0.1:4097. Inlined (not imported) because opencode 1.18's file-plugin
+// loader does not resolve relative subdir imports, which silently prevented this
+// plugin from loading. 'export' keywords stripped so these stay module-private;
+// guardrail.ts default-exports only GuardrailPlugin.
+// ===========================================================================
+/**
+ * guardrail_client.ts — thin TypeScript fetch wrapper around the OpenCode HTTP API.
+ *
+ * Ported from the Python OpenCodeClient pattern in
+ * images/scl-plugin-network-topology-ubuntu-opencode/shared/opencode_client.py,
+ * but stripped down to exactly what the guardrail plugin (guardrail.ts) needs to
+ * drive the GUARDRAIL opencode serve on 127.0.0.1:4097:
+ *
+ *   createSession -> promptAsync -> poll /session/status -> getMessages
+ *                  -> (abortSession on timeout)
+ *
+ * Design constraints (per GUARDRAIL_IMPLEMENTATION_PLAN.md section 5 / shared contract):
+ *   - Dependency-free (uses the global fetch provided by Bun).
+ *   - Guardrail is loopback-only => Authorization header is OPTIONAL (default none).
+ *   - Short request timeouts; recoverable HTTP/parse failures return null rather
+ *     than throw, so the plugin can apply its fail-safe (refuse + escalate).
+ *     Only programming-level misuse throws a typed GuardrailClientError.
+ *   - Status enums + grace-period logic mirror the Python client so behaviour
+ *     (especially the "saw_busy before idle counts" race guard) is identical.
+ *
+ * NOTE: This module talks to the GUARDRAIL process (4097), NOT the executor (4096).
+ * It is imported only by the executor-side plugin (guardrail.ts). The guardrail
+ * process itself never loads the plugin, so there is no recursion here.
+ */
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** Default base URL of the GUARDRAIL opencode serve (loopback, not published). */
+const DEFAULT_GUARDRAIL_BASE = "http://127.0.0.1:4097";
+
+/** Milliseconds between status polls inside runToIdle. */
+const DEFAULT_POLL_MS = 1000;
+
+/** Hard ceiling for a single runToIdle wait (mirrors Python DEFAULT_TIMEOUT). */
+const DEFAULT_TIMEOUT_MS = 60_000;
+
+/**
+ * Grace period during which an "idle/ready" status is NOT yet treated as
+ * completion. Matches shared/constants.py GRACE_PERIOD_SECONDS = 15.
+ * Prevents the race where polling starts before the server picks up the
+ * async prompt.
+ */
+const GRACE_PERIOD_MS = 15_000;
+
+/** Per-request HTTP timeout (ms) for ordinary GET/POST calls. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** Health-check timeout (ms) — short, we retry. */
+const HEALTH_TIMEOUT_MS = 5_000;
+
+/** Retries used by getMessages before giving up (mirrors Python). */
+const GET_MESSAGE_RETRIES = 3;
+
+/** Statuses that mean the session is actively working. */
+const BUSY_STATES = ["busy", "pending", "running", "active", "generating"];
+
+/** Statuses that mean the session is finished (or accepted-as-finished). */
+const IDLE_STATES = ["completed", "idle", "ready", "done"];
+
+/** Errors that are always final (the session errored). */
+const FINAL_ERROR_STATES = ["error", "failed"];
+
+/** A message part as emitted by the opencode HTTP API. */
+interface MessagePart {
+  type: string;
+  text?: string;
+  tool?: string;
+  state?: Record<string, unknown>;
+  [k: string]: unknown;
+}
+
+/** A message object as returned by GET /session/{id}/message. */
+interface ApiMessage {
+  id?: string;
+  role?: string;
+  type?: string;
+  info?: {
+    role?: string;
+    tokens?: { input?: number; output?: number; reasoning?: number };
+    cost?: number;
+    [k: string]: unknown;
+  };
+  parts?: MessagePart[];
+  content?: string | MessagePart[] | unknown;
+  text?: string;
+  [k: string]: unknown;
+}
+
+/**
+ * Token usage as returned by opencode on assistant messages (info.tokens).
+ * Captured from the judge's loopback session so guardrail cost can be logged
+ * exactly alongside agent cost — see promptSync / persistGuardrailTurn.
+ */
+interface TokenUsage {
+  total?: number;
+  input?: number;
+  output?: number;
+  reasoning?: number;
+  cache?: { read?: number; write?: number };
+}
+
+/** Per-command aggregate of judge token usage across all retry attempts. */
+interface AggregatedTokens {
+  input: number;
+  output: number;
+  reasoning: number;
+  cache_read: number;
+  cache_write: number;
+  total: number;
+}
+
+/** Body shape for prompt_async (mirrors Python: parts + agent). */
+interface PromptBody {
+  parts: { type: "text"; text: string }[];
+  agent: string;
+}
+
+/** Optional request options shared by all calls. */
+interface CallOptions {
+  /** Override the per-request timeout (ms). */
+  timeoutMs?: number;
+  /** Optional bearer token / api key. Loopback guardrail usually has none. */
+  authToken?: string;
+  /** Optional fetch-level AbortSignal (caller-controlled). */
+  signal?: AbortSignal;
+}
+
+/** Options for runToIdle. */
+interface RunToIdleOptions extends CallOptions {
+  /** Poll interval (ms). Default 1000. */
+  pollMs?: number;
+  /** Max wall-clock time to wait (ms). Default 60000. */
+  timeoutMs?: number;
+  /**
+   * If true (default), call abortSession when runToIdle times out, so the
+   * guardrail process does not keep a runaway session alive.
+   */
+  abortOnTimeout?: boolean;
+}
+
+/** Result of runToIdle. */
+interface RunToIdleResult {
+  /** Final messages array, or null if it could not be fetched. */
+  messages: ApiMessage[] | null;
+  /** Why the wait ended. */
+  reason:
+    | "completed" // saw busy then idle/error
+    | "idle-after-grace" // never saw busy but exceeded grace period
+    | "completed-immediate" // completed on first poll (e.g. errored)
+    | "timeout" // hit timeoutMs
+    | "status-error" // could not read status at all
+    | "messages-error"; // completed but messages fetch failed
+  /** Last raw status value observed (for debugging / trace). */
+  lastStatus: unknown;
+  /** Elapsed wall-clock ms. */
+  elapsedMs: number;
+}
+
+/** Typed error for programming misuse (bad base URL, etc.). Recoverable HTTP /
+ * parse failures return null instead — the caller applies fail-safe policy. */
+class GuardrailClientError extends Error {
+  cause?: unknown;
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.name = "GuardrailClientError";
+    this.cause = cause;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/** Sleep for ms. Resolves early if signal aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (ms <= 0) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Normalise a base URL (strip trailing slash). */
+function normalizeBase(base?: string): string {
+  const b = (base && base.trim()) || DEFAULT_GUARDRAIL_BASE;
+  if (!/^https?:\/\//i.test(b)) {
+    throw new GuardrailClientError(
+      `Invalid guardrail base URL (must start with http(s)://): ${b}`,
+    );
+  }
+  return b.replace(/\/+$/, "");
+}
+
+/** Build an AbortController that fires after timeoutMs and is linked to signal. */
+function timeoutSignal(timeoutMs: number, signal?: AbortSignal): AbortSignal {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(new Error("request timeout")), timeoutMs);
+  // If the caller's signal aborts, propagate.
+  if (signal) {
+    if (signal.aborted) ctrl.abort(signal.reason);
+    else
+      signal.addEventListener(
+        "abort",
+        () => ctrl.abort(signal.reason),
+        { once: true },
+      );
+  }
+  // Best-effort clear once this controller settles.
+  ctrl.signal.addEventListener(
+    "abort",
+    () => clearTimeout(t),
+    { once: true },
+  );
+  return ctrl.signal;
+}
+
+/** Headers incl. optional auth + json content-type. */
+function buildHeaders(withBody: boolean, authToken?: string): HeadersInit {
+  const h: Record<string, string> = { Accept: "application/json" };
+  if (withBody) h["Content-Type"] = "application/json";
+  if (authToken) h["Authorization"] = `${authToken}`;
+  return h;
+}
+
+/** Coerce a fetch body into parsed JSON, returning null on any failure. */
+async function parseJson(res: Response): Promise<any | null> {
+  try {
+    const txt = await res.text();
+    if (!txt) return null;
+    return JSON.parse(txt);
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /global/health — returns true if the server reports healthy=true.
+ * Never throws; returns false on any error (used in a poll loop).
+ */
+async function checkHealth(
+  base?: string,
+  opts?: CallOptions,
+): Promise<boolean> {
+  const b = normalizeBase(base);
+  try {
+    const res = await fetch(`${b}/global/health`, {
+      method: "GET",
+      headers: buildHeaders(false, opts?.authToken),
+      signal: timeoutSignal(HEALTH_TIMEOUT_MS, opts?.signal),
+    });
+    if (!res.ok) return false;
+    const body = await parseJson(res);
+    return Boolean(body && body.healthy === true);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Poll /global/health until healthy or timeout (ms). Returns true on success.
+ * Default timeout 120s (mirrors Python wait_for_server).
+ */
+async function waitForServer(
+  base?: string,
+  timeoutMs: number = 120_000,
+  opts?: CallOptions,
+): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (opts?.signal?.aborted) return false;
+    if (await checkHealth(base, opts)) return true;
+    await sleep(2_000, opts?.signal);
+  }
+  return false;
+}
+
+/**
+ * POST /session — create a new session.
+ * @returns the session id, or null on failure.
+ */
+async function createSession(
+  base?: string,
+  title?: string,
+  opts?: CallOptions,
+): Promise<string | null> {
+  const b = normalizeBase(base);
+  try {
+    const body: Record<string, unknown> = {};
+    if (title) body.title = title;
+    const res = await fetch(`${b}/session`, {
+      method: "POST",
+      headers: buildHeaders(true, opts?.authToken),
+      body: JSON.stringify(body),
+      signal: timeoutSignal(opts?.timeoutMs ?? REQUEST_TIMEOUT_MS, opts?.signal),
+    });
+    if (!res.ok) return null;
+    const json = await parseJson(res);
+    if (!json || typeof json.id !== "string") return null;
+    return json.id;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * POST /session/{id}/prompt_async — fire a prompt at the guardrail agent.
+ * Body mirrors the Python client: { parts: [{type:"text", text}], agent }.
+ * @returns true if accepted (HTTP 200/204).
+ */
+async function promptAsync(
+  base: string | undefined,
+  sessionId: string,
+  message: string,
+  agent: string,
+  opts?: CallOptions,
+): Promise<boolean> {
+  if (!sessionId) {
+    throw new GuardrailClientError("promptAsync: sessionId is required");
+  }
+  const b = normalizeBase(base);
+  const body: PromptBody = {
+    parts: [{ type: "text", text: message }],
+    agent,
+  };
+  try {
+    const res = await fetch(`${b}/session/${encodeURIComponent(sessionId)}/prompt_async`, {
+      method: "POST",
+      headers: buildHeaders(true, opts?.authToken),
+      body: JSON.stringify(body),
+      signal: timeoutSignal(opts?.timeoutMs ?? REQUEST_TIMEOUT_MS, opts?.signal),
+    });
+    return res.status === 200 || res.status === 204;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Result of a synchronous guardrail prompt.
+ */
+interface PromptSyncResult {
+  ok: boolean;
+  /** The last assistant text extracted from the response, or null. */
+  text: string | null;
+  /** HTTP status (diagnostic). */
+  status: number;
+  /** Token usage for the judge turn (info.tokens), when opencode returns it. */
+  tokens?: TokenUsage;
+  /** Cost in USD (info.cost), when opencode returns it. */
+  cost?: number;
+}
+
+/**
+ * POST /session/{id}/message — SYNCHRONOUS prompt (blocks until the guardrail
+ * agent finishes its turn, then returns the assistant message inline).
+ *
+ * This is the reliable path on opencode 1.17.9: the async path (prompt_async +
+ * polling /session/status + GET /message) does NOT surface the guardrail's output
+ * on a loopback serve (/session/status returns {} and /message stays empty for
+ * async-prompted sessions). The sync endpoint returns the completed message in
+ * the response body — either an array of messages or { info, parts:[...] }.
+ *
+ * @returns { ok, text } where text is the last assistant text part, best-effort.
+ *          Never throws — returns { ok:false, text:null } on any failure.
+ */
+async function promptSync(
+  base: string | undefined,
+  sessionId: string,
+  message: string,
+  agent: string,
+  opts?: CallOptions,
+): Promise<PromptSyncResult> {
+  if (!sessionId) {
+    throw new GuardrailClientError("promptSync: sessionId is required");
+  }
+  const b = normalizeBase(base);
+  const body: PromptBody = {
+    parts: [{ type: "text", text: message }],
+    agent,
+  };
+  try {
+    const res = await fetch(`${b}/session/${encodeURIComponent(sessionId)}/message`, {
+      method: "POST",
+      headers: buildHeaders(true, opts?.authToken),
+      body: JSON.stringify(body),
+      signal: timeoutSignal(opts?.timeoutMs ?? REQUEST_TIMEOUT_MS, opts?.signal),
+    });
+    if (!res.ok) {
+      return { ok: false, text: null, status: res.status };
+    }
+    const json: unknown = await parseJson(res);
+    let text: string | null = null;
+    let tokens: TokenUsage | undefined;
+    let cost: number | undefined;
+    const captureUsage = (u: { tokens?: TokenUsage; cost?: number }): void => {
+      if (u.tokens) tokens = u.tokens;
+      if (u.cost !== undefined) cost = u.cost;
+    };
+    if (Array.isArray(json)) {
+      text = getLastAssistantText(json as ApiMessage[]);
+      captureUsage(getLastAssistantUsage(json as ApiMessage[]));
+    } else if (json && typeof json === "object") {
+      const obj = json as Record<string, unknown>;
+      // opencode sync shape: { info: { tokens, cost }, parts: [ {type:"text",text}, ... ] }
+      captureUsage(infoUsage(obj));
+      if (Array.isArray(obj.parts)) {
+        for (const p of obj.parts as Array<Record<string, unknown>>) {
+          if (p && p.type === "text" && typeof p.text === "string" && p.text.length) {
+            text = p.text;
+          }
+        }
+      } else if (Array.isArray(obj.messages)) {
+        text = getLastAssistantText(obj.messages as ApiMessage[]);
+        captureUsage(getLastAssistantUsage(obj.messages as ApiMessage[]));
+      } else if (typeof obj.text === "string") {
+        text = obj.text;
+      }
+    }
+    return { ok: true, text, status: res.status, tokens, cost };
+  } catch {
+    return { ok: false, text: null, status: 0 };
+  }
+}
+
+/**
+ * GET /session/status — returns the full status map (all sessions).
+ * Never throws; returns null on failure.
+ */
+async function getStatus(
+  base?: string,
+  opts?: CallOptions,
+): Promise<Record<string, unknown> | null> {
+  const b = normalizeBase(base);
+  try {
+    const res = await fetch(`${b}/session/status`, {
+      method: "GET",
+      headers: buildHeaders(false, opts?.authToken),
+      signal: timeoutSignal(opts?.timeoutMs ?? 10_000, opts?.signal),
+    });
+    if (!res.ok) return null;
+    const json = await parseJson(res);
+    return json && typeof json === "object" ? (json as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET /session/status filtered to one session id.
+ * @returns the status value for that session (string/object), or null if the
+ *          session is absent or the request failed.
+ */
+async function getSessionStatus(
+  base: string | undefined,
+  sessionId: string,
+  opts?: CallOptions,
+): Promise<unknown | null> {
+  if (!sessionId) return null;
+  const all = await getStatus(base, opts);
+  if (!all) return null;
+  return Object.prototype.hasOwnProperty.call(all, sessionId)
+    ? all[sessionId]
+    : null;
+}
+
+/**
+ * GET /session/{id}/message — fetch all messages, with up to 3 retries.
+ * Mirrors Python get_session_messages.
+ * @returns array of messages, or null on failure.
+ */
+async function getMessages(
+  base: string | undefined,
+  sessionId: string,
+  opts?: CallOptions,
+): Promise<ApiMessage[] | null> {
+  if (!sessionId) {
+    throw new GuardrailClientError("getMessages: sessionId is required");
+  }
+  const b = normalizeBase(base);
+  for (let attempt = 1; attempt <= GET_MESSAGE_RETRIES; attempt++) {
+    try {
+      const res = await fetch(`${b}/session/${encodeURIComponent(sessionId)}/message`, {
+        method: "GET",
+        headers: buildHeaders(false, opts?.authToken),
+        signal: timeoutSignal(opts?.timeoutMs ?? REQUEST_TIMEOUT_MS, opts?.signal),
+      });
+      if (res.ok) {
+        const json = await parseJson(res);
+        if (Array.isArray(json)) return json as ApiMessage[];
+        // Non-array body — treat as failure but don't crash.
+      }
+    } catch {
+      // fall through to retry
+    }
+    if (attempt < GET_MESSAGE_RETRIES) await sleep(2_000, opts?.signal);
+  }
+  return null;
+}
+
+/**
+ * POST /session/{id}/abort — abort a running session.
+ * @returns true if the server acknowledged (HTTP 200).
+ */
+async function abortSession(
+  base: string | undefined,
+  sessionId: string,
+  opts?: CallOptions,
+): Promise<boolean> {
+  if (!sessionId) return false;
+  const b = normalizeBase(base);
+  try {
+    const res = await fetch(`${b}/session/${encodeURIComponent(sessionId)}/abort`, {
+      method: "POST",
+      headers: buildHeaders(false, opts?.authToken),
+      signal: timeoutSignal(opts?.timeoutMs ?? 10_000, opts?.signal),
+    });
+    return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Poll /session/status until the guardrail session is idle/complete (or errors,
+ * or times out), then fetch its messages.
+ *
+ * Mirrors Python wait_for_session_complete's race guard:
+ *   - Track whether we ever saw a BUSY status. An IDLE status only counts as
+ *     completion if we previously saw busy, OR if the grace period elapsed
+ *     (so we don't mistake a not-yet-picked-up async prompt for "done").
+ *   - "error"/"failed" statuses are final immediately.
+ *   - Session disappearing from the status map is treated as completion once
+ *     we've seen busy or passed the grace period.
+ *
+ * @returns RunToIdleResult. messages may be null if the messages fetch failed
+ *          even though the session completed (reason: "messages-error").
+ *          Never throws.
+ */
+async function runToIdle(
+  base: string | undefined,
+  sessionId: string,
+  opts?: RunToIdleOptions,
+): Promise<RunToIdleResult> {
+  const start = Date.now();
+  const empty: RunToIdleResult = {
+    messages: null,
+    reason: "status-error",
+    lastStatus: null,
+    elapsedMs: 0,
+  };
+  if (!sessionId) {
+    throw new GuardrailClientError("runToIdle: sessionId is required");
+  }
+
+  const pollMs = opts?.pollMs ?? DEFAULT_POLL_MS;
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const abortOnTimeout = opts?.abortOnTimeout ?? true;
+
+  let sawBusy = false;
+  let lastStatus: unknown = null;
+  let sawStatusNull = false;
+
+  const finish = async (
+    reason: RunToIdleResult["reason"],
+  ): Promise<RunToIdleResult> => {
+    const elapsedMs = Date.now() - start;
+    let messages: ApiMessage[] | null = null;
+    let finalReason = reason;
+    if (reason !== "timeout") {
+      messages = await getMessages(base, sessionId, opts);
+      if (messages === null && reason !== "status-error") {
+        finalReason = "messages-error";
+      }
+    }
+    return { messages, reason: finalReason, lastStatus, elapsedMs };
+  };
+
+  while (true) {
+    if (opts?.signal?.aborted) {
+      if (abortOnTimeout) await abortSession(base, sessionId, opts);
+      return { ...empty, reason: "timeout", elapsedMs: Date.now() - start };
+    }
+    if (Date.now() - start >= timeoutMs) {
+      if (abortOnTimeout) await abortSession(base, sessionId, opts);
+      return { ...empty, reason: "timeout", lastStatus, elapsedMs: Date.now() - start };
+    }
+
+    const status = await getSessionStatus(base, sessionId, opts);
+    lastStatus = status;
+    const elapsedMs = Date.now() - start;
+
+    // Session absent from the status map.
+    if (status === null || status === undefined) {
+      sawStatusNull = true;
+      // Treat as completion if we already saw busy, or we're past the grace
+      // period (mirrors Python "status is None" branch).
+      if (sawBusy || elapsedMs >= GRACE_PERIOD_MS) {
+        return await finish("completed");
+      }
+      await sleep(pollMs, opts?.signal);
+      continue;
+    }
+
+    const statusStr = String(
+      typeof status === "object" ? JSON.stringify(status) : status,
+    ).toLowerCase();
+
+    if (BUSY_STATES.some((s) => statusStr.includes(s))) {
+      sawBusy = true;
+    }
+
+    // Hard errors are always final.
+    if (FINAL_ERROR_STATES.some((s) => statusStr.includes(s))) {
+      return await finish("completed");
+    }
+
+    // Idle / completed states.
+    if (IDLE_STATES.some((s) => statusStr.includes(s))) {
+      if (sawBusy) {
+        return await finish("completed");
+      }
+      if (elapsedMs >= GRACE_PERIOD_MS) {
+        return await finish("idle-after-grace");
+      }
+      // First-poll idle without ever seeing busy and still inside grace —
+      // keep polling; the async prompt may not have been picked up yet.
+    }
+
+    await sleep(pollMs, opts?.signal);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience: extract the last assistant text from a messages array.
+// (The guardrail plugin needs this to find the strict JSON verdict the guardrail
+//  agent emits. Defensive against glm-5.2's occasional malformed tool-call text.)
+// ---------------------------------------------------------------------------
+function getLastAssistantText(
+  messages: ApiMessage[] | null | undefined,
+): string {
+  if (!messages || !Array.isArray(messages)) return "";
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || typeof msg !== "object") continue;
+    const role = (msg.role ?? msg.type ?? "") as string;
+    if (role !== "assistant" && role !== "model") continue;
+
+    let content: unknown = msg.content ?? msg.text;
+    if (content === undefined && Array.isArray(msg.parts)) {
+      content = msg.parts
+        .map((p) => (p && typeof p === "object" && typeof p.text === "string" ? p.text : ""))
+        .join(" ");
+    }
+    if (Array.isArray(content)) {
+      content = content
+        .map((p) =>
+          p && typeof p === "object" && typeof (p as MessagePart).text === "string"
+            ? (p as MessagePart).text
+            : String(p),
+        )
+        .join(" ");
+    } else if (typeof content !== "string") {
+      content = String(content ?? "");
+    }
+    const text = (content as string).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// Token-usage extraction + aggregation for the guardrail judge.
+// opencode returns info.tokens {total,input,output,reasoning,cache:{read,write}}
+// and info.cost on every assistant message. These pull that out of the judge's
+// loopback-session responses so guardrail cost can be logged exactly.
+// ---------------------------------------------------------------------------
+
+/** Coerce a maybe-number to a finite number (0 otherwise). */
+function num(n: unknown): number {
+  return typeof n === "number" && Number.isFinite(n) ? n : 0;
+}
+
+/** Pull { tokens, cost } from an opencode message/object's `info`, if present. */
+function infoUsage(
+  msg: ApiMessage | Record<string, unknown> | null | undefined,
+): { tokens?: TokenUsage; cost?: number } {
+  if (!msg || typeof msg !== "object") return {};
+  const info = (msg as { info?: unknown }).info;
+  if (!info || typeof info !== "object") return {};
+  const i = info as { tokens?: TokenUsage; cost?: number };
+  const out: { tokens?: TokenUsage; cost?: number } = {};
+  if (i.tokens && typeof i.tokens === "object") out.tokens = i.tokens;
+  if (typeof i.cost === "number" && Number.isFinite(i.cost)) out.cost = i.cost;
+  return out;
+}
+
+/** Last assistant message's { tokens, cost }, mirroring getLastAssistantText. */
+function getLastAssistantUsage(
+  messages: ApiMessage[] | null | undefined,
+): { tokens?: TokenUsage; cost?: number } {
+  if (!messages || !Array.isArray(messages)) return {};
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (!msg || typeof msg !== "object") continue;
+    const role = (msg.role ?? msg.type ?? "") as string;
+    if (role !== "assistant" && role !== "model") continue;
+    const u = infoUsage(msg);
+    if (u.tokens || u.cost !== undefined) return u;
+  }
+  return {};
+}
+
+/**
+ * Sum token usage + cost across retry attempts into a per-command aggregate.
+ * `total` is derived (input+output+reasoning+cache) rather than summed per
+ * attempt, since opencode's per-message total already equals that sum.
+ */
+function sumAttemptTokens(
+  attempts: AttemptSummary[] | null | undefined,
+): { tokens: AggregatedTokens; cost: number } {
+  const z: AggregatedTokens = { input: 0, output: 0, reasoning: 0, cache_read: 0, cache_write: 0, total: 0 };
+  let cost = 0;
+  for (const a of attempts ?? []) {
+    const t = a.tokens;
+    if (t) {
+      z.input += num(t.input);
+      z.output += num(t.output);
+      z.reasoning += num(t.reasoning);
+      z.cache_read += num(t.cache?.read);
+      z.cache_write += num(t.cache?.write);
+    }
+    cost += num(a.cost);
+  }
+  z.total = z.input + z.output + z.reasoning + z.cache_read + z.cache_write;
+  return { tokens: z, cost };
+}
+
+const __test__ = {
+  BUSY_STATES,
+  IDLE_STATES,
+  FINAL_ERROR_STATES,
+  GRACE_PERIOD_MS,
+  normalizeBase,
+};
+
+
+// --- aliases guardrail.ts references these by (wc* names) ---
+const wcCreateSession = createSession
+const wcPromptSync = promptSync
+const wcAbortSession = abortSession
+const wcGetMessages = getMessages
+const wcGetLastAssistantText = getLastAssistantText
+const wcGetSessionStatus = getSessionStatus
+
+
+// Process-wide serializer for judge adjudication. opencode judge sessions are
+// stateful conversations and the sync /message RPC is unsafe under concurrent
+// prompts to the same session (verdict/stdout crossing on parallel bash calls).
+// Holding this lock while a command is adjudicated guarantees only one prompt is
+// in the session at a time. See judge_lock.ts.
+import { withJudgeLock } from "./lib/judge_lock"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -118,6 +892,10 @@ interface AttemptSummary {
   parsedVia: string
   /** Why this attempt did not yield a clean verdict ("" on success). */
   reason: string
+  /** Token usage for this judge attempt (info.tokens), when available. */
+  tokens?: TokenUsage
+  /** Cost in USD for this attempt (info.cost), when available. */
+  cost?: number
 }
 
 /**
@@ -175,8 +953,8 @@ interface GuardrailConfig {
   approvalsDir: string // /outputs/<run_id>/guardrail/approvals
 }
 
-function readConfig(): GuardrailConfig {
-  const runId = envStr("RUN_ID", "run_local")
+function readConfig(runIdOverride?: string): GuardrailConfig {
+  const runId = runIdOverride || envStr("RUN_ID", "run_local")
   // GUARDRAIL_PROFILE / GUARDRAIL_GOAL here are FALLBACKS only. The effective profile
   // is resolved per command in handleBash() from the active executor session's
   // agent (resolveAgent -> profileForAgent), so two agents sharing one host each
@@ -193,11 +971,17 @@ function readConfig(): GuardrailConfig {
     decisionTimeoutMs: envInt("GUARDRAIL_DECISION_TIMEOUT", 120) * 1000,
     verdictRetries: envInt("GUARDRAIL_VERDICT_RETRIES", 2),
     pollIntervalMs: envInt("GUARDRAIL_POLL_INTERVAL", 1500),
-    verdictsPath: envStr("GUARDRAIL_VERDICTS_PATH", `/outputs/${runId}/guardrail/verdicts.ndjson`),
+    // Explicit per-host path overrides are legacy-only.  Once a session mapping
+    // selected a launch, all mutable artifacts must stay under that launch.
+    verdictsPath: runIdOverride
+      ? `/outputs/${runId}/guardrail/verdicts.ndjson`
+      : envStr("GUARDRAIL_VERDICTS_PATH", `/outputs/${runId}/guardrail/verdicts.ndjson`),
     mode: readMode(runId),
     hitlPollMs: envInt("HITL_POLL_MS", 1000),
     hitlTimeoutMs: envInt("HITL_APPROVAL_TIMEOUT_S", 0) * 1000,
-    approvalsDir: envStr("GUARDRAIL_APPROVALS_DIR", `/outputs/${runId}/guardrail/approvals`),
+    approvalsDir: runIdOverride
+      ? `/outputs/${runId}/guardrail/approvals`
+      : envStr("GUARDRAIL_APPROVALS_DIR", `/outputs/${runId}/guardrail/approvals`),
   }
 }
 
@@ -277,13 +1061,17 @@ const TIER1_SAFE = (() => {
 // spaces or shell flags (e.g. "ls /usr/bin/nmap" becomes one executable name).
 // ---------------------------------------------------------------------------
 
-async function runLocal(_$shell: any, command: string): Promise<ShellCapture> {
+async function runLocal(_$shell: any, command: string, runId?: string): Promise<ShellCapture> {
   try {
     const { exec } = await import("node:child_process")
     return new Promise((resolve) => {
+      const childEnv = {
+        ...(process.env as Record<string, string>),
+        ...(runId ? { RUN_ID: runId } : {}),
+      }
       exec(
         command,
-        { shell: true, env: process.env as Record<string, string> },
+        { shell: true, env: childEnv },
         (error, stdout, stderr) => {
           if (error) {
             // exec returns an error for non-zero exits; we map it to a captured result.
@@ -325,6 +1113,10 @@ async function persistVerdict(
     mode: string
     executed: boolean
     exitCode: number
+    /** Aggregated judge token usage for this command, when the judge ran. */
+    tokens?: AggregatedTokens
+    /** Aggregated judge cost (USD) for this command, when the judge ran. */
+    cost?: number
   },
 ): Promise<void> {
   try {
@@ -342,6 +1134,9 @@ async function persistVerdict(
         executed: fields.executed,
         exit_code: fields.exitCode,
         reason: fields.reason,
+        // Aggregated judge token usage (absent on no-judge paths: low mode,
+        // reporter, global halt before adjudication).
+        ...(fields.tokens ? { tokens: fields.tokens, cost: fields.cost } : {}),
       }) + "\n"
     await appendFile(cfg.verdictsPath, line, { encoding: "utf8" })
   } catch {
@@ -374,6 +1169,9 @@ async function persistGuardrailTurn(
     const dir = path.join(`/outputs/${runId}/guardrail/sessions`)
     await mkdir(dir, { recursive: true })
     const file = path.join(dir, `${key}.jsonl`)
+    // Aggregate judge token usage across retry attempts (best-effort; omitted
+    // when the judge never reported usage, e.g. http-failure-only attempts).
+    const usage = sumAttemptTokens(attempts)
     const line =
       JSON.stringify({
         ts: new Date().toISOString(),
@@ -394,6 +1192,8 @@ async function persistGuardrailTurn(
         parsed_via: parsedVia,
         failure_reason: failureReason,
         messages,
+        // Aggregated judge token usage for this command (sum across attempts).
+        ...(usage.tokens.total > 0 ? { tokens: usage.tokens, cost: usage.cost } : {}),
         // Per-attempt retry trace (absent on paths that never enter the retry
         // loop). Shows how each attempt to obtain a clean verdict fared.
         attempts: attempts && attempts.length ? attempts : undefined,
@@ -836,6 +1636,80 @@ function REPORTER_SAFE(command: string): boolean {
 // correct guardrail gate per command. This is what lets two agents share one host
 // and each be governed by its own gate (coder56 scope-keeper vs defender gate).
 const agentCache = new Map<string, string>()
+const sessionRunCache = new Map<string, string>()
+
+function mappedRunForSession(sessionId: string): string {
+  if (!/^[A-Za-z0-9_.-]+$/.test(sessionId)) return ""
+  try {
+    const raw = JSON.parse(
+      readFileSync(`/outputs/.session-runs/${sessionId}.json`, "utf8"),
+    ) as Record<string, unknown>
+    const runId = typeof raw?.run_id === "string" ? raw.run_id.trim() : ""
+    return /^[A-Za-z0-9_.-]+$/.test(runId) ? runId : ""
+  } catch {
+    return ""
+  }
+}
+
+/**
+ * Resolve a tool call to its launch-scoped RUN_ID.  The backend maps each root
+ * lead session before acceptance; phase and verifier sessions are discovered by
+ * following OpenCode parentID links.  Found mappings are immutable and cached.
+ */
+async function resolveSessionRunId(
+  executorUrl: string,
+  execSessionId: string,
+  fallbackRunId: string,
+  callerSignal?: AbortSignal,
+): Promise<string> {
+  const cached = sessionRunCache.get(execSessionId)
+  if (cached) return cached
+
+  let cursor = execSessionId
+  const visited: string[] = []
+  for (let depth = 0; depth < 16 && cursor; depth += 1) {
+    if (visited.includes(cursor)) break
+    visited.push(cursor)
+
+    const mapped = mappedRunForSession(cursor)
+    if (mapped) {
+      for (const id of visited) sessionRunCache.set(id, mapped)
+      return mapped
+    }
+
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 5000)
+      if (callerSignal) {
+        if (callerSignal.aborted) controller.abort()
+        else callerSignal.addEventListener("abort", () => controller.abort(), { once: true })
+      }
+      const res = await fetch(
+        `${executorUrl.replace(/\/+$/, "")}/session/${encodeURIComponent(cursor)}`,
+        { signal: controller.signal },
+      )
+      clearTimeout(timer)
+      if (!res.ok) break
+      const body: any = await res.json()
+      cursor = typeof body?.parentID === "string" ? body.parentID.trim() : ""
+    } catch {
+      break
+    }
+  }
+  // Do not cache fallback: a just-created child may become queryable on its next
+  // command, at which point it should inherit the root mapping.
+  return fallbackRunId
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+// The guardrail judge may execute a sanctioned command itself.  Wrap only the
+// judge-side command so its shell also expands $RUN_ID for the active launch.
+function commandForRun(command: string, runId: string): string {
+  return `env RUN_ID=${shellQuote(runId)} sh -lc ${shellQuote(command)}`
+}
 
 async function resolveAgent(
   executorUrl: string,
@@ -1122,6 +1996,8 @@ async function extractVerdictWithRetries(
   messages: ApiMessage[] | null
   failureReason: string
   attempts: AttemptSummary[]
+  tokens: AggregatedTokens
+  cost: number
   sessionId: string | null
 }> {
   // verdictRetries is an operator knob for extra attempts, but it may never
@@ -1143,10 +2019,16 @@ async function extractVerdictWithRetries(
       break
     }
 
-    // Every attempt gets a fresh one-turn judge session. Reusing a session
-    // makes OpenCode replay prior prompt/response history on the next attempt,
-    // turning a transient failure into an O(n²) token bill.
-    const guardrailSessionId = await wcCreateSession(cfg.httpUrl, sessionName, callOpts)
+    // Every attempt gets a fresh, SINGLE-USE judge session. Two requirements:
+    //   1. Pass NO title. A stable title (e.g. "guardrail-coder56") makes
+    //      opencode hand back an EXISTING idle session by that title, so every
+    //      command would append to one shared conversation — token bloat AND,
+    //      combined with concurrent prompts, verdict/stdout crossing. No title
+    //      => a genuinely new session each call.
+    //   2. Abort the session once we have its verdict (below) so it can never be
+    //      reused or accumulate. (The withJudgeLock serializer in handleBash is
+    //      the correctness backstop that holds even if this ever regresses.)
+    const guardrailSessionId = await wcCreateSession(cfg.httpUrl, undefined, callOpts)
     if (!guardrailSessionId) {
       failureReason = "guardrail session creation failed"
       break
@@ -1213,9 +2095,19 @@ async function extractVerdictWithRetries(
     //    only returns the message object).
     let rawText: string | null = syncRes.text
     let messages: ApiMessage[] | null = null
+    let attemptTokens = syncRes.tokens
+    let attemptCost = syncRes.cost
     if (!rawText) {
       messages = await wcGetMessages(cfg.httpUrl, guardrailSessionId, callOpts)
-      if (messages) rawText = wcGetLastAssistantText(messages)
+      if (messages) {
+        rawText = wcGetLastAssistantText(messages)
+        // Sync response sometimes omits info; recover usage from the fetched message.
+        if (!attemptTokens) {
+          const u = getLastAssistantUsage(messages)
+          attemptTokens = u.tokens
+          if (attemptCost === undefined) attemptCost = u.cost
+        }
+      }
     }
     lastRawText = rawText
     lastMessages = messages
@@ -1224,6 +2116,7 @@ async function extractVerdictWithRetries(
       failureReason = `guardrail completed but produced no assistant text (attempt ${attempt}/${maxAttempts})`
       attempts.push({
         attempt, ok: true, status: syncRes.status, hadText: false, parsedVia: "none", reason: failureReason,
+        tokens: attemptTokens, cost: attemptCost,
       })
     } else {
       const parsed = parseVerdict(rawText)
@@ -1231,15 +2124,21 @@ async function extractVerdictWithRetries(
       if (parsed.verdict) {
         attempts.push({
           attempt, ok: true, status: syncRes.status, hadText: true, parsedVia: parsed.parsedVia, reason: "",
+          tokens: attemptTokens, cost: attemptCost,
         })
+        // Discard this single-use session now that we have its verdict, so it
+        // can never be reused (prevents shared-state + resource accumulation).
+        await wcAbortSession(cfg.httpUrl, guardrailSessionId, callOpts).catch(() => {})
+        const agg = sumAttemptTokens(attempts)
         return {
           verdict: parsed.verdict, parsedVia: parsed.parsedVia, rawText, messages, failureReason: "", attempts,
-          sessionId: lastSessionId,
+          tokens: agg.tokens, cost: agg.cost, sessionId: lastSessionId,
         }
       }
       failureReason = `verdict parse failed (via ${parsed.parsedVia}, attempt ${attempt}/${maxAttempts})`
       attempts.push({
         attempt, ok: true, status: syncRes.status, hadText: true, parsedVia: parsed.parsedVia, reason: failureReason,
+        tokens: attemptTokens, cost: attemptCost,
       })
     }
 
@@ -1255,6 +2154,11 @@ async function extractVerdictWithRetries(
     }
   }
 
+  // Best-effort: discard the last single-use session so it cannot be reused.
+  if (lastSessionId) {
+    await wcAbortSession(cfg.httpUrl, lastSessionId, callOpts).catch(() => {})
+  }
+  const agg = sumAttemptTokens(attempts)
   return {
     verdict: null,
     parsedVia: lastParsedVia,
@@ -1262,6 +2166,8 @@ async function extractVerdictWithRetries(
     messages: lastMessages,
     failureReason: failureReason || "guardrail produced no clean verdict after retries",
     attempts,
+    tokens: agg.tokens,
+    cost: agg.cost,
     sessionId: lastSessionId,
   }
 }
@@ -1272,7 +2178,13 @@ async function extractVerdictWithRetries(
 
 async function handleBash(args: { command: string }, context: any, ctx: PluginCtx): Promise<string> {
   const command: string = (args && args.command) || ""
-  const cfg = readConfig()
+  const execSessionId = resolveExecSessionId(context)
+  const ctxSignal = pickAbortSignal(context)
+  const baseCfg = readConfig()
+  const activeRunId = execSessionId
+    ? await resolveSessionRunId(baseCfg.executorHttpUrl, execSessionId, baseCfg.runId, ctxSignal)
+    : baseCfg.runId
+  const cfg = readConfig(activeRunId)
 
   // The shared $ shell from plugin context; fall back to a child_process shim if
   // opencode did not provide one (defensive — should never happen in 1.17.9).
@@ -1284,7 +2196,7 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
       // Extremely defensive: no shell API at all. Surface a captured error.
       return formatResult({ stdout: "", stderr: "[guardrail] no shell API available", exitCode: 127 })
     }
-    const res = await runLocal($shell, command)
+    const res = await runLocal($shell, command, cfg.runId)
     return formatResult(res)
   }
 
@@ -1294,7 +2206,7 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
   //     Still log to verdicts.ndjson so a low (run-everything) engagement leaves
   //     an audit trail like every other path.
   if (cfg.mode === "low") {
-    const res = await runLocal($shell, command)
+    const res = await runLocal($shell, command, cfg.runId)
     await persistVerdict(cfg, {
       command, decision: "execute", reason: "low mode pass-through (operator)",
       profile: cfg.profile, mode: modeForProfile(cfg.profile), executed: true, exitCode: res.exitCode,
@@ -1309,13 +2221,10 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
   //    surface for the attacker (it ran e.g. `printenv GUARDRAIL_GOAL` locally with no
   //    judge). resolveAgent is cached per session, so this costs at most one loopback
   //    call on the first command of a session.
-  const execSessionId = resolveExecSessionId(context)
-
   // Propagate the executor's cancellation signal (ToolContext.abort) into the
   // guardrail HTTP calls so a cancelled executor turn promptly aborts the guardrail
   // prompt instead of running out the full decision-timeout. guardrail_client
   // links any caller `signal` into its per-request AbortControllers.
-  const ctxSignal = pickAbortSignal(context)
   const callOpts = { timeoutMs: cfg.decisionTimeoutMs, signal: ctxSignal }
 
   // Resolve per command (not per-host): two agents sharing one host each get their
@@ -1338,7 +2247,7 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
   //    scan would block those writes as if they were network calls. The reporter
   //    is backend-spawned, single-purpose, and trusted; it is never guarded.
   if (profile === "reporter") {
-    const res = await runLocal($shell, command)
+    const res = await runLocal($shell, command, cfg.runId)
     await persistVerdict(cfg, {
       command, decision: "execute",
       reason: "reporter profile: trusted backend-driven reporter, UNGOVERNED (never guarded)",
@@ -1372,7 +2281,7 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
 
   // 3b. TIER-1 deterministic shortcut — DEFENDER ONLY. coder56 is always judged.
   if (profile === "defender" && TIER1_SAFE(command)) {
-    const res = await runLocal($shell, command)
+    const res = await runLocal($shell, command, cfg.runId)
     return formatResult(res)
   }
 
@@ -1392,18 +2301,35 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
   let verdict: Verdict | null = null
   let parsedVia = "none"
   let failureReason = ""
+  // Aggregated judge token usage (filled by the adjudication try-block below;
+  // passed into post-adjudication persistVerdict calls so verdicts.ndjson carries
+  // per-command guardrail cost). Stays undefined on no-judge / judge-error paths.
+  let judgeTokens: AggregatedTokens | undefined
+  let judgeCost: number | undefined
 
   try {
-    const prompt = buildGuardrailPrompt(command, goal, profile, mode, trace)
+    const prompt = buildGuardrailPrompt(commandForRun(command, cfg.runId), goal, profile, mode, trace)
     // The judge is intentionally stateless: each command and each recovery
     // attempt runs in a fresh session, so neither normal commands nor retries
     // accumulate untrusted prior transcript history.
-    const outcome = await extractVerdictWithRetries(
-      cfg, `guardrail-${profile}`, prompt, agentName, callOpts,
+    //
+    // SERIALIZE adjudication through withJudgeLock: the judge drives a stateful
+    // opencode session, and the sync /message RPC is unsafe when two commands
+    // are adjudicated concurrently (parallel bash calls can receive a SIBLING's
+    // verdict+stdout — the cause of memory reads returning ping/nmap output).
+    // One command in the session at a time => the sync reply always matches its
+    // own prompt. This is the correctness backstop; Fix 2 below makes the
+    // session fresh + single-use so the shared-state window is gone entirely.
+    const outcome = await withJudgeLock(() =>
+      extractVerdictWithRetries(
+        cfg, `guardrail-${profile}`, prompt, agentName, callOpts,
+      ),
     )
     verdict = outcome.verdict
     parsedVia = outcome.parsedVia
     failureReason = outcome.failureReason
+    judgeTokens = outcome.tokens
+    judgeCost = outcome.cost
 
     // Persist full guardrail turn (including the actual final attempt session
     // and retry trace) before any outcome decision.
@@ -1464,21 +2390,23 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
         await persistVerdict(cfg, {
           command, decision: "escalate", reason: `hitl ${why}`,
           profile, mode, executed: false, exitCode: 126,
+          tokens: judgeTokens, cost: judgeCost,
         }).catch(() => {})
         return formatRefused(gFb, `[guardrail] command not executed (${why})`)
       }
       if (dec.action === "approve") {
         // Run the REAL command — never the model's possibly-fabricated stdout.
-        const res = await runLocal($shell, command)
+        const res = await runLocal($shell, command, cfg.runId)
         await persistVerdict(cfg, {
           command, decision: "execute", reason: "hitl approve (operator)",
           profile, mode, executed: true, exitCode: res.exitCode,
+          tokens: judgeTokens, cost: judgeCost,
         }).catch(() => {})
         return formatResult(res)
       }
       if (dec.action === "modify" && dec.modified_command && dec.modified_command.trim()) {
         const mod = dec.modified_command
-        const res = await runLocal($shell, mod)
+        const res = await runLocal($shell, mod, cfg.runId)
         const merged: ShellCapture = {
           stdout: res.stdout,
           stderr: `[guardrail] operator modified command: ${mod}\n${res.stderr ?? ""}`.replace(/\n+$/, "\n"),
@@ -1487,6 +2415,7 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
         await persistVerdict(cfg, {
           command: `${command}  ==>  ${mod}`, decision: "execute", reason: "hitl modify (operator)",
           profile, mode, executed: true, exitCode: res.exitCode,
+          tokens: judgeTokens, cost: judgeCost,
         }).catch(() => {})
         return formatResult(merged)
       }
@@ -1508,6 +2437,7 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
       await persistVerdict(cfg, {
         command, decision: "refuse", reason: `hitl ${dec.action} (operator)`,
         profile, mode, executed: false, exitCode: 126,
+        tokens: judgeTokens, cost: judgeCost,
       }).catch(() => {})
       return formatRefused(shown, `[guardrail] command not executed (${label})`)
     }
@@ -1525,20 +2455,30 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
   const trustworthyPath = parsedVia === "json-fence" || parsedVia === "json-object"
   const mayExecute =
     verdict &&
-    (verdict.executed || verdict.decision === "execute" || verdict.decision === "sanitize") &&
-    (verdict.executed || trustworthyPath)
+    (verdict.decision === "execute" || verdict.decision === "sanitize") &&
+    (verdict.executed || (verdict.decision === "execute" && trustworthyPath))
   if (mayExecute) {
-    // The guardrail either ran the command itself (executed=true) and reports the
-    // captured output, or sanctioned execution. For sanitize, return the guardrail's
-    // CLEANED stdout (already scrubbed on the guardrail side).
-    const exitCode = Number.isFinite(verdict.exit_code) ? verdict.exit_code : 0
-    const outcome: ShellCapture = {
-      stdout: verdict.stdout ?? "",
-      stderr: verdict.stderr ?? "",
-      exitCode,
+    // Normally the judge ran the command and supplied its genuine capture. A
+    // structured execute verdict may instead sanction execution without running
+    // it; in that case execute the original exactly once here, still inside the
+    // guardrail path. A sanitize verdict is accepted only with executed=true,
+    // because otherwise there is no trustworthy output to scrub.
+    let outcome: ShellCapture
+    if (verdict.executed) {
+      outcome = {
+        stdout: verdict.stdout ?? "",
+        stderr: verdict.stderr ?? "",
+        exitCode: Number.isFinite(verdict.exit_code) ? verdict.exit_code : 0,
+      }
+    } else {
+      outcome = await runLocal($shell, command, cfg.runId)
     }
+    const exitCode = outcome.exitCode
     const decisionLabel = verdict.decision
-    const reasonLabel = verdict.reason || `executed via guardrail (parsed: ${parsedVia})`
+    const reasonLabel = verdict.reason ||
+      (verdict.executed
+        ? `executed by guardrail judge (parsed: ${parsedVia})`
+        : `sanctioned by guardrail judge; executed once by hook (parsed: ${parsedVia})`)
     await persistVerdict(cfg, {
       command,
       decision: decisionLabel,
@@ -1547,6 +2487,8 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
       mode,
       executed: true,
       exitCode,
+      tokens: judgeTokens,
+      cost: judgeCost,
     }).catch(() => {})
     return formatResult(outcome)
   }
@@ -1568,6 +2510,8 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
     mode,
     executed: false,
     exitCode: 126,
+    tokens: judgeTokens,
+    cost: judgeCost,
   }).catch(() => {})
   return refusedStr
 }
@@ -1632,45 +2576,156 @@ function buildGuardrailPrompt(
 // Plugin export
 // ---------------------------------------------------------------------------
 
-export const GuardrailPlugin: Plugin = async (ctx: PluginCtx) => {
+function rewriteAsCapturedResult(output: { args: any }, result: string): void {
+  const escaped = String(result).replace(/'/g, "'\\''")
+  if (!output.args || typeof output.args !== "object") output.args = {}
+  // Preserve any built-in tool metadata (for example timeout/description) while
+  // replacing only the executable command.
+  output.args.command = `printf '%s' '${escaped}'`
+}
+
+// OpenCode records and executes the same mutable args object. Restore the
+// proposed command after the harmless printf runs so the completed transcript
+// shows what the model actually proposed. Otherwise the model sees a different
+// command in its own tool call and may retry the original.
+const proposedCommands = new Map<string, string>()
+
+async function restoreRecordedToolInput(
+  sessionID: string,
+  callID: string,
+  command: string,
+): Promise<void> {
+  try {
+    const base = readConfig().executorHttpUrl.replace(/\/+$/, "")
+    const list = await fetch(`${base}/session/${encodeURIComponent(sessionID)}/message`, {
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!list.ok) return
+    const messages = await list.json() as any[]
+    for (const message of Array.isArray(messages) ? messages : []) {
+      for (const part of Array.isArray(message?.parts) ? message.parts : []) {
+        if (part?.type !== "tool" || part?.callID !== callID) continue
+        const patched = {
+          ...part,
+          state: {
+            ...part.state,
+            input: {
+              ...(part?.state?.input && typeof part.state.input === "object" ? part.state.input : {}),
+              command,
+            },
+          },
+        }
+        await fetch(
+          `${base}/session/${encodeURIComponent(sessionID)}` +
+            `/message/${encodeURIComponent(part.messageID)}` +
+            `/part/${encodeURIComponent(part.id)}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(patched),
+            signal: AbortSignal.timeout(5000),
+          },
+        )
+        return
+      }
+    }
+  } catch {
+    // Transcript restoration is observability only. The command has already
+    // been adjudicated and the built-in still executes only the safe printf.
+  }
+}
+
+export const GuardrailPlugin = async (ctx: PluginCtx) => {
+  verificationMarker("/tmp/gr_load.log", "PLUGIN_LOADED entry=guardrail.ts")
+  // Gate the built-in bash through the exact hook used by OpenCode 1.18.3.
+  // handleBash owns every real execution; the built-in runs only printf.
   return {
-    tool: {
-      // Register a custom tool named "bash". The executor opencode.json disables
-      // the built-in bash (`tools: { bash: false }`) so this custom tool replaces
-      // it. If a name collision were observed at runtime, the fallback name is
-      // "shell" (the model re-reads the tool list each turn) — but we prefer "bash".
-      bash: tool({
-        description:
-          "Run a shell command. Non-trivial commands are audited by the guardrail agent before execution; the guardrail may execute, sanitize, or refuse the command and returns the result (or feedback).",
-        args: {
-          // tool.schema.string() — the documented Zod schema helper for a single
-          // string argument named "command".
-          command: tool.schema.string(),
-        },
-        async execute(args: { command: string }, context: any) {
+    "tool.execute.before": async (
+      input: { tool: string; sessionID: string; callID: string },
+      output: { args: any },
+    ) => {
+      if (input?.tool !== "bash" && input?.tool !== "shell") return
+      const original = output?.args?.command
+      const command = typeof original === "string" ? original : ""
+      try {
+        verificationMarker(
+          "/tmp/gr_hook.log",
+          `HOOK_FIRE tool=${input.tool} session=${input.sessionID} call=${input.callID} cmd=${command.slice(0, 160)}`,
+        )
+        if (!command.trim()) {
+          const cfg = readConfig()
+          await persistVerdict(cfg, {
+            command,
+            decision: "escalate",
+            reason: "built-in shell invocation had a missing or empty command",
+            profile: cfg.profile,
+            mode: modeForProfile(cfg.profile),
+            executed: false,
+            exitCode: 126,
+          }).catch(() => {})
+          proposedCommands.set(input.callID, command)
+          rewriteAsCapturedResult(output, formatRefused("", "command refused by guardrail (invalid command)"))
+          return
+        }
+        const context = { sessionID: input.sessionID, callID: input.callID }
+        let result: string
+        try {
+          result = await handleBash({ command }, context, (ctx ?? {}) as PluginCtx)
+        } catch (err) {
           try {
-            return await handleBash(args, context, (ctx ?? {}) as PluginCtx)
-          } catch (err) {
-            // Absolute last-resort fail-safe: never throw out of the tool (a throw
-            // would surface an opencode error string; we prefer a bash-shaped refuse).
-            try {
-              const cfg = readConfig()
-              await persistVerdict(cfg, {
-                command: (args && args.command) || "",
-                decision: "escalate",
-                reason: `uncaught tool error: ${safeStr(err)}`,
-                profile: cfg.profile,
-                mode: modeForProfile(cfg.profile),
-                executed: false,
-                exitCode: 126,
-              }).catch(() => {})
-            } catch {
-              /* ignore */
-            }
-            return formatRefused("", "command refused by guardrail (escalated)")
+            const cfg = readConfig()
+            await persistVerdict(cfg, {
+              command,
+              decision: "escalate",
+              reason: `uncaught hook error: ${safeStr(err)}`,
+              profile: cfg.profile,
+              mode: modeForProfile(cfg.profile),
+              executed: false,
+              exitCode: 126,
+            }).catch(() => {})
+          } catch {
+            /* ignore */
           }
-        },
-      }),
+          result = formatRefused("", "command refused by guardrail (escalated)")
+        }
+        proposedCommands.set(input.callID, command)
+        rewriteAsCapturedResult(output, result)
+      } catch (err) {
+        // Last-resort fail-safe. This catch MUST rewrite the original command:
+        // swallowing an exception here would otherwise let the built-in bash
+        // execute the untouched, unadjudicated command.
+        try {
+          const cfg = readConfig()
+          await persistVerdict(cfg, {
+            command,
+            decision: "escalate",
+            reason: `unexpected tool.execute.before failure: ${safeStr(err)}`,
+            profile: cfg.profile,
+            mode: modeForProfile(cfg.profile),
+            executed: false,
+            exitCode: 126,
+          }).catch(() => {})
+        } catch {
+          /* persistence is best-effort; command substitution below is mandatory */
+        }
+        proposedCommands.set(input.callID, command)
+        rewriteAsCapturedResult(output, formatRefused("", "command refused by guardrail (hook failure)"))
+      }
+    },
+    "tool.execute.after": async (
+      input: { tool: string; sessionID: string; callID: string; args: any },
+      output: { title: string; output: string; metadata: any },
+    ) => {
+      if (input?.tool !== "bash" && input?.tool !== "shell") return
+      const proposed = proposedCommands.get(input.callID)
+      if (proposed === undefined) return
+      try {
+        if (input.args && typeof input.args === "object") input.args.command = proposed
+        output.title = proposed
+        await restoreRecordedToolInput(input.sessionID, input.callID, proposed)
+      } finally {
+        proposedCommands.delete(input.callID)
+      }
     },
   }
 }
