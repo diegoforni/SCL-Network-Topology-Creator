@@ -110,6 +110,13 @@ ENV/
 env.bak/
 venv.bak/
 
+# Node / Bun — the guardrail plugin (images/*/guardrail/package.json) declares
+# dev dependencies (@opencode-ai/plugin). A local `bun install` / `npm install`
+# populates node_modules/ next to it; that must never be committed or land in a
+# Docker build context.
+node_modules/
+.bun/
+
 # Spyder project settings
 .spyderproject
 .spyproject
