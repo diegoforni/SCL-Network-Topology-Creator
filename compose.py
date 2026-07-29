@@ -275,6 +275,14 @@ def generate_compose(topology, opencode_images=None):
                         'GUARDRAIL_PROFILE': guardrail_profile,
                         'GUARDRAIL_GOAL': app.GUARDRAIL_GOALS.get(guardrail_goal_key, ''),
                         'GUARDRAIL_HTTP_URL': 'http://127.0.0.1:4097',
+                        # Judge retry/timeout policy. One 600s attempt (0 retries)
+                        # instead of the default 3x120s: a slow or momentarily-
+                        # unreachable judge gets the full 600s in a single shot
+                        # rather than being cut off at 120s three times in a row.
+                        # On exhaustion the judge-fail fallback (judge_fail.txt,
+                        # default "escalate") decides execute-vs-hold.
+                        'GUARDRAIL_DECISION_TIMEOUT': '1800',
+                        'GUARDRAIL_VERDICT_RETRIES': '0',
                         # Temporary verification instrumentation is opt-in and
                         # disabled by default. It is toggled only on disposable
                         # smoke runs via the topology host field.

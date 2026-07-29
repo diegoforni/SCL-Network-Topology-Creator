@@ -951,6 +951,10 @@ interface GuardrailConfig {
   hitlPollMs: number // approval-file poll interval
   hitlTimeoutMs: number // 0 = wait forever (a human decides); else ms ceiling
   approvalsDir: string // /outputs/<run_id>/guardrail/approvals
+  // Fallback when the judge itself is unreachable (no verdict at all). "escalate"
+  // (default, fail-safe) holds the command for operator review; "allow" executes
+  // it instead of stalling on judge downtime. Never overrides a real verdict.
+  judgeFailDecision: "escalate" | "allow"
 }
 
 function readConfig(runIdOverride?: string): GuardrailConfig {
@@ -977,6 +981,7 @@ function readConfig(runIdOverride?: string): GuardrailConfig {
       ? `/outputs/${runId}/guardrail/verdicts.ndjson`
       : envStr("GUARDRAIL_VERDICTS_PATH", `/outputs/${runId}/guardrail/verdicts.ndjson`),
     mode: readMode(runId),
+    judgeFailDecision: readJudgeFail(runId),
     hitlPollMs: envInt("HITL_POLL_MS", 1000),
     hitlTimeoutMs: envInt("HITL_APPROVAL_TIMEOUT_S", 0) * 1000,
     approvalsDir: runIdOverride
@@ -997,6 +1002,22 @@ function readMode(runId: string): "low" | "medium" | "high" | "auto" {
     /* absent — default below */
   }
   return "medium"
+}
+
+// Read the operator-selected fallback for when the guardrail judge itself is
+// unreachable (http 0 / timeout / parse-fail / exception => no verdict). Written
+// by the agent-manager backend to /outputs/<run_id>/guardrail/judge_fail.txt; absent
+// => "escalate" (fail-safe: hold for operator review). "allow" executes the command
+// instead of stalling on judge downtime. Same per-run, per-command channel + cost as
+// mode.txt — read fresh every command, so a console toggle takes effect immediately.
+function readJudgeFail(runId: string): "escalate" | "allow" {
+  try {
+    const raw = readFileSync(`/outputs/${runId}/guardrail/judge_fail.txt`, "utf8").trim().toLowerCase()
+    if (raw === "allow") return "allow"
+  } catch {
+    /* absent — default below */
+  }
+  return "escalate"
 }
 
 // ---------------------------------------------------------------------------
@@ -2349,6 +2370,24 @@ async function handleBash(args: { command: string }, context: any, ctx: PluginCt
   } catch (err) {
     failureReason = `guardrail exception: ${safeStr(err)}`
     verdict = null
+  }
+
+  // Judge-unavailable fallback (per-run judge_fail.txt, default "escalate" = fail-
+  // safe hold). When the judge produced NO verdict at all — http 0 / timeout /
+  // parse-fail / exception — the operator may choose to auto-allow the command
+  // through instead of stalling on operator review. This NEVER overrides a genuine
+  // refuse/sanitize/escalate verdict (the judge spoke, it holds); only the "judge
+  // itself was unreachable" case (verdict === null) is eligible.
+  if (!verdict && cfg.judgeFailDecision === "allow") {
+    const res = await runLocal($shell, command, cfg.runId)
+    await persistVerdict(cfg, {
+      command,
+      decision: "execute",
+      reason: `judge unavailable — auto-allow (${failureReason || "no verdict"})`,
+      profile, mode, executed: true, exitCode: res.exitCode,
+      tokens: judgeTokens, cost: judgeCost,
+    }).catch(() => {})
+    return formatResult(res)
   }
 
   // --- Human-in-the-loop (operator console) ---
