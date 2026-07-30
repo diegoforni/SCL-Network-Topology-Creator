@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SCL Systems &mdash; Web Cluster</title>
+  <style>
+    body { font-family: sans-serif; background:#f4f6f8; color:#1f2933; margin:0; }
+    header { background:#1b2a4a; color:#fff; padding:18px 28px; }
+    header h1 { margin:0; font-size:20px; }
+    main { max-width:760px; margin:24px auto; background:#fff; padding:24px 32px; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,.1); }
+    a { color:#1b6ec2; }
+    .card { border:1px solid #e1e4e8; border-radius:6px; padding:14px 16px; margin:12px 0; }
+    .muted { color:#6a737d; font-size:12px; }
+    footer { margin-top:28px; border-top:1px solid #eee; padding-top:12px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>SCL Systems &mdash; Customer Portal Web Cluster</h1>
+</header>
+<main>
+  <p>Welcome to the SCL Systems customer portal node. This host fronts the logistics
+  order-tracking application and exposes a legacy operations console.</p>
+
+  <div class="card">
+    <strong>Operations</strong>
+    <ul>
+      <li><a href="/cgi-bin/status.sh">System Status (CGI console)</a> &mdash; uptime &amp; memory</li>
+      <li><a href="/customers.txt">Customer directory</a></li>
+    </ul>
+  </div>
+
+  <div class="card muted">
+    Internal note: the status console is an old CGI wrapper kept for compatibility.
+    Scheduled for decommission in Q4.
+  </div>
+
+  <footer class="muted">
+    Powered by lighttpd &middot; SCL Systems NOC &middot; status: nominal
+  </footer>
+</main>
+</body>
+</html>
