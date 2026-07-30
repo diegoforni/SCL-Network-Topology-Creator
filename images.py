@@ -349,3 +349,172 @@ def ensure_repo_image(topology, force_rebuild=False):
     if build.returncode != 0:
         raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.REPO_HOST_IMAGE}')
     print(f"✅ Built repo-host image: {app.REPO_HOST_IMAGE}")
+
+
+def ensure_ad_image(topology, force_rebuild=False):
+    """Build the AD-host (Samba AD DC) image if any host is an `ad-server`.
+
+    Mirrors ensure_repo_image's build-from-context pattern. The image bakes Samba 4 +
+    a first-boot domain-provisioning supervisor (no external repo clone, no runtime
+    egress). Provisioning runs at first boot and is idempotent (gated by a marker file)
+    so the DC adapts to the container hostname/IP. See images/scl-ad-host/.
+    """
+    has_ad_host = any(
+        host.get('type') == 'ad-server'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_ad_host:
+        return
+
+    if not force_rebuild:
+        result = subprocess.run(['docker', 'image', 'inspect', app.AD_HOST_IMAGE], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ AD-host image exists: {app.AD_HOST_IMAGE}")
+            return
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-ad-host'
+    if not context.exists():
+        raise RuntimeError(f'AD-host image build context not found: {context}')
+    print(f"🔨 Building AD-host image: {app.AD_HOST_IMAGE} from {context}")
+    build = subprocess.run(
+        ['docker', 'build', '-t', app.AD_HOST_IMAGE, str(context)],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.AD_HOST_IMAGE}')
+    print(f"✅ Built AD-host image: {app.AD_HOST_IMAGE}")
+
+
+def ensure_rdp_image(topology, force_rebuild=False):
+    """Build the RDP-host (xrdp + pwsh) image if any host is a `windows-client`.
+
+    Mirrors ensure_ad_image's build-from-context pattern. The image bakes a real RDP
+    server + PowerShell and a first-boot supervisor (no runtime egress). Provisioning
+    runs at first boot and is idempotent (gated by a marker file). See
+    images/scl-rdp-host/.
+    """
+    has_rdp_host = any(
+        host.get('type') == 'windows-client'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_rdp_host:
+        return
+
+    if not force_rebuild:
+        result = subprocess.run(['docker', 'image', 'inspect', app.RDP_HOST_IMAGE], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ RDP-host image exists: {app.RDP_HOST_IMAGE}")
+            return
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-rdp-host'
+    if not context.exists():
+        raise RuntimeError(f'RDP-host image build context not found: {context}')
+    print(f"🔨 Building RDP-host image: {app.RDP_HOST_IMAGE} from {context}")
+    build = subprocess.run(
+        ['docker', 'build', '-t', app.RDP_HOST_IMAGE, str(context)],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.RDP_HOST_IMAGE}')
+    print(f"✅ Built RDP-host image: {app.RDP_HOST_IMAGE}")
+
+
+def ensure_web_image(topology, force_rebuild=False):
+    """Build the web-host (lighttpd + SSH, Shellshock) image if any host is a
+    `vuln-web-server`.
+
+    Mirrors ensure_rdp_image's build-from-context pattern. The image bakes lighttpd +
+    a Shellshock-vulnerable old bash (4.3 base) and a first-boot supervisor (no runtime
+    egress). Provisioning runs at first boot and is idempotent (gated by a marker file).
+    See images/scl-web-host/.
+    """
+    has_web_host = any(
+        host.get('type') == 'vuln-web-server'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_web_host:
+        return
+
+    if not force_rebuild:
+        result = subprocess.run(['docker', 'image', 'inspect', app.WEB_HOST_IMAGE], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ Web-host image exists: {app.WEB_HOST_IMAGE}")
+            return
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-web-host'
+    if not context.exists():
+        raise RuntimeError(f'Web-host image build context not found: {context}')
+    print(f"🔨 Building Web-host image: {app.WEB_HOST_IMAGE} from {context}")
+    build = subprocess.run(
+        ['docker', 'build', '-t', app.WEB_HOST_IMAGE, str(context)],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.WEB_HOST_IMAGE}')
+    print(f"✅ Built Web-host image: {app.WEB_HOST_IMAGE}")
+
+
+def ensure_greedy_image(topology, force_rebuild=False):
+    """Build the greedy-host image if any host is a `greedy-server`.
+
+    Mirrors ensure_repo_image: the image bakes in the ingSoftII "Greedy Cars"
+    repo (sparse-cloned to SCRUM/integrador at build time by the daemon, so the
+    topology host needs no runtime egress for the SOURCE — note greedy_cars
+    still does an eager Auth0 fetch at startup, so the host net needs internet).
+    The cloned repo URL and tested revision come from GREEDY_HOST_URL and
+    GREEDY_HOST_REF. Existing tags are reused only when their OCI source labels
+    match both values, avoiding the stale-image failure that masked fixes.
+    """
+    has_greedy_host = any(
+        host.get('type') == 'greedy-server'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_greedy_host:
+        return
+
+    if not force_rebuild:
+        result = subprocess.run(
+            [
+                'docker', 'image', 'inspect',
+                '--format',
+                '{{index .Config.Labels "org.opencontainers.image.source"}} '
+                '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+                app.GREEDY_HOST_IMAGE,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        expected = f'{app.GREEDY_HOST_URL} {app.GREEDY_HOST_REF}'
+        if result.returncode == 0 and result.stdout.strip() == expected:
+            print(f"✅ Greedy-host image exists: {app.GREEDY_HOST_IMAGE}")
+            return
+        if result.returncode == 0:
+            print(
+                f"♻️ Rebuilding stale Greedy-host image: "
+                f"found labels {result.stdout.strip()!r}, expected {expected!r}"
+            )
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-greedy-host'
+    if not context.exists():
+        raise RuntimeError(f'Greedy-host image build context not found: {context}')
+    print(
+        f"🔨 Building greedy-host image: {app.GREEDY_HOST_IMAGE} from {context} "
+        f"(repo: {app.GREEDY_HOST_URL}, ref: {app.GREEDY_HOST_REF})"
+    )
+    build = subprocess.run(
+        [
+            'docker', 'build',
+            '--build-arg', f'GREEDY_HOST_URL={app.GREEDY_HOST_URL}',
+            '--build-arg', f'GREEDY_HOST_REF={app.GREEDY_HOST_REF}',
+            '-t', app.GREEDY_HOST_IMAGE,
+            str(context),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.GREEDY_HOST_IMAGE}')
+    print(f"✅ Built greedy-host image: {app.GREEDY_HOST_IMAGE}")

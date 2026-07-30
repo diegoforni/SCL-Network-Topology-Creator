@@ -9,6 +9,28 @@ LABEL description="SCL Network Topology Plugin with OpenCode support"
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-server shadow \
     && rm -rf /var/lib/apt/lists/* 2>/dev/null || true
 
+# AD / attacker tooling for coder56 AD engagements (ad-server host + ad-kerberoast skill).
+#   krb5-user : kinit / kvno / klist — the NATIVE Kerberos client (the working path on
+#               Samba DCs; impacket's GetUserSPNs -request is rejected by Heimdal).
+#   smbclient : retrieve files from protected shares
+#   nmap/ldap-utils/dnsutils : recon
+#   hashcat + pocl-opencl-icd + ocl-icd-libopencl1 : offline cracker (CPU/OpenCL)
+#   impacket : GetUserSPNs.py (SPN enumeration via LDAP), secretsdump, etc.
+# RDP tooling for windows-client hosts (rdp-cred-attack skill):
+#   freerdp2-x11 + xvfb : confirm a guessed RDP credential by opening a real session
+#       (`xvfb-run -a xfreerdp ... /sec:rdp`) — a correct login renders a desktop, a
+#       wrong one does not. (xrdp uses security_layer=rdp on these hosts.)
+#   hydra : test a small candidate set. NOTE: hydra's *rdp* module FALSE-POSITIVES
+#       against xrdp (reports wrong passwords as valid) — for RDP use xfreerdp; hydra's
+#       *ssh* module is reliable and is the clean way to confirm a guessed credential
+#       (the weak RDP password reuses on SSH too).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nmap smbclient krb5-user ldap-utils dnsutils python3-pip \
+        hashcat pocl-opencl-icd ocl-icd-libopencl1 \
+        freerdp2-x11 xvfb hydra \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip3 install --break-system-packages impacket
+
 # Pin OpenCode to the plugin API version verified by this image. The installer
 # supports --version; assert the resulting binary so a bad/stale download cannot
 # silently produce a different runtime.
@@ -78,6 +100,18 @@ RUN mkdir -p /root/.config/opencode/skills \
     && cp -r /tmp/cybersecurity-skills-*/skills/* /root/.config/opencode/skills/ \
     && rm -rf /tmp/cs.tgz /tmp/cybersecurity-skills-* \
     && echo "Installed $(find /root/.config/opencode/skills -name SKILL.md | wc -l) cybersecurity skills"
+
+# Custom SCL attacker skills (land alongside the 29 generic cybersecurity skills),
+# the AD-lab crack wordlist, and the ccache->hashcat helper used by ad-kerberoast.
+COPY skills/ /root/.config/opencode/skills/
+COPY wordlists/ad-lab.txt /usr/share/wordlists/ad-lab.txt
+COPY bin/krb5cc-to-hashcat.py /usr/local/bin/krb5cc-to-hashcat.py
+RUN chmod +x /usr/local/bin/krb5cc-to-hashcat.py
+
+# Target-agnostic Zerologon (CVE-2020-1472) reset helper — takes DC NetBIOS name + IP as
+# arguments; no baked target data. Used by the ad-zerologon skill.
+COPY bin/cve-2020-1472-exploit.py /usr/local/bin/cve-2020-1472-exploit.py
+RUN chmod +x /usr/local/bin/cve-2020-1472-exploit.py
 
 # Copy entrypoint script
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

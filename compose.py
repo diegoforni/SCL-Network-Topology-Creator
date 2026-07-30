@@ -178,11 +178,19 @@ def generate_compose(topology, opencode_images=None):
             host_has_agents = bool(app.host_agents(host))
             host_base_image = host.get('image', 'ubuntu:24.04')
 
-            # Dynamic image selection: repo-server hosts use the dedicated
-            # repo-host image (external repo baked in); agent hosts use their
-            # OpenCode variant; everything else uses the plain base image.
+            # Dynamic image selection: repo-server / greedy-server / ad-server hosts
+            # use their dedicated image (full-stack app / Samba AD DC); agent hosts
+            # use their OpenCode variant; everything else uses the plain base image.
             if host.get('type') == 'repo-server':
                 host_image = app.REPO_HOST_IMAGE
+            elif host.get('type') == 'greedy-server':
+                host_image = app.GREEDY_HOST_IMAGE
+            elif host.get('type') == 'ad-server':
+                host_image = app.AD_HOST_IMAGE
+            elif host.get('type') == 'windows-client':
+                host_image = app.RDP_HOST_IMAGE
+            elif host.get('type') == 'vuln-web-server':
+                host_image = app.WEB_HOST_IMAGE
             elif host_has_agents:
                 host_image = opencode_images.get(host_base_image, app.OPENCODE_IMAGE)
             else:
@@ -208,6 +216,67 @@ def generate_compose(topology, opencode_images=None):
             # Attach all hosts to scl-playground-net for SCL service connectivity
             service_config['networks']['scl-playground-net'] = {}
 
+            if host.get('type') == 'greedy-server':
+                service_config['restart'] = 'unless-stopped'
+                volume_key = f'greedy-data-{service_name}'
+                volume_name = f'{project_prefix}-{service_name}-mysql-data'
+                compose.setdefault('volumes', {})[volume_key] = {
+                    'name': volume_name,
+                }
+                service_config['volumes'] = [
+                    f'{volume_key}:/var/lib/mysql',
+                ]
+                # Read service credentials from a protected file under data/.
+                # This path is relative to data/topologies/<topology-id>/,
+                # keeping secrets out of generated compose JSON and the repo.
+                service_config['env_file'] = ['../../greedy.env']
+                service_config['healthcheck'] = {
+                    'test': ['CMD', '/usr/local/bin/greedy-healthcheck.sh'],
+                    'interval': '10s',
+                    'timeout': '5s',
+                    'retries': 12,
+                    'start_period': '180s',
+                }
+
+            if host.get('type') == 'ad-server':
+                # The Samba AD DC provisions on first boot (~15-60s) before `samba -i`
+                # serves Kerberos/SMB. Without a healthcheck, a coder56 launch issued
+                # right after topology start races provisioning and hits a not-yet-ready
+                # DC. Probe SMB auth as the readiness signal (svc_sql is always created).
+                service_config['healthcheck'] = {
+                    'test': ['CMD', 'bash', '-lc', "smbclient //127.0.0.1/netlogon -U 'SC\\svc_sql%Dragon2024!' -c 'ls' >/dev/null 2>&1"],
+                    'interval': '10s',
+                    'timeout': '5s',
+                    'retries': 18,
+                    'start_period': '120s',
+                }
+
+            if host.get('type') == 'windows-client':
+                # The RDP host provisions on first boot before `xrdp --nodaemon` serves
+                # :3389. Without a healthcheck, a coder56 launch issued right after
+                # topology start races provisioning and hits a not-yet-ready RDP. Probe
+                # the RDP listener as the readiness signal (nc is baked in the image).
+                service_config['healthcheck'] = {
+                    'test': ['CMD', 'bash', '-lc', 'nc -w1 -z 127.0.0.1 3389 >/dev/null 2>&1'],
+                    'interval': '10s',
+                    'timeout': '5s',
+                    'retries': 18,
+                    'start_period': '90s',
+                }
+
+            if host.get('type') == 'vuln-web-server':
+                # The web host provisions on first boot before `lighttpd -D` serves :80.
+                # Without a healthcheck, a coder56 launch issued right after topology start
+                # races provisioning and hits a not-yet-ready web server. Probe the HTTP
+                # listener as the readiness signal (nc is baked in the image).
+                service_config['healthcheck'] = {
+                    'test': ['CMD', 'bash', '-lc', 'nc -w1 -z 127.0.0.1 80 >/dev/null 2>&1'],
+                    'interval': '10s',
+                    'timeout': '5s',
+                    'retries': 18,
+                    'start_period': '90s',
+                }
+
             # Conditional OpenCode configuration (ports, volumes, environment, healthcheck) only when agents present
             if host_has_agents:
                 # Agent scripts (host AGENTS_HOST_PATH) + the shared outputs dir (host, rw)
@@ -216,7 +285,7 @@ def generate_compose(topology, opencode_images=None):
                 # scl-plugin-network-topology-ubuntu-opencode image (its Dockerfile COPYs
                 # them from this plugin's images dir), so topology hosts need NO host-path
                 # image bind mount — keeping them free of any host image-path dependency.
-                volumes = [
+                volumes = service_config.get('volumes', []) + [
                     f'{app.AGENTS_HOST_PATH}:/app/agents:ro',
                     # Persist agent run logs (timeline + opencode messages) to the shared
                     # host outputs dir so they survive teardown and are Replay-readable.
