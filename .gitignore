@@ -154,15 +154,3 @@ dmypy.json
 /images/scl-repo-host/.env
 /images/scl-repo-host/backend.env
 /images/scl-repo-host/*.env
-
-# greedy-server host: the external ingSoftII monorepo is sparse-cloned at IMAGE
-# BUILD time by the Docker daemon (see images/scl-greedy-host/Dockerfile), so
-# the third-party code is never committed here. This also guards against any
-# local clone of that repo ever landing in the build context and being pushed.
-# A baked .env (if ever added) would hold runtime secrets and must NOT be pushed.
-/images/scl-greedy-host/repo/
-/images/scl-greedy-host/.env
-/images/scl-greedy-host/*.env
-
-# Runtime service credentials for generated greedy-server topology hosts.
-/data/greedy.env

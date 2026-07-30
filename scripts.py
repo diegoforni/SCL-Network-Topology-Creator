@@ -190,7 +190,7 @@ def host_script(topology, network, host, host_index, gateway):
     data_content = host.get('data_content') or default_data_for_host(topology, network, host)
     service_block = role_service_block(host['type'])
     foreground_service_block = ''
-    if host['type'] in ('greedy-server', 'ad-server', 'windows-client', 'vuln-web-server'):
+    if host['type'] in ('ad-server', 'windows-client', 'vuln-web-server'):
         # The supervisor must become the container's foreground process so a failed
         # stack/DC fails the container instead of being hidden behind `tail -f /dev/null`.
         foreground_service_block = service_block
@@ -297,14 +297,10 @@ def role_service_block(host_type):
         # The full app stack (MariaDB + Node backend + nginx/frontend) is baked
         # into the image; this supervisor brings it up. See repo-app-start.sh.
         return "bash /usr/local/bin/repo-app-start.sh >/var/log/repo-app.log 2>&1 &"
-    if host_type == 'greedy-server':
-        # The supervisor remains in the foreground so a failed stack makes the
-        # container fail instead of being hidden behind `tail -f /dev/null`.
-        return "exec /usr/local/bin/greedy-app-start.sh"
     if host_type == 'ad-server':
         # AD DC supervisor: provisions the Samba domain on first boot, then runs
-        # `samba -i` in the foreground so a failed DC fails the container (mirrors
-        # greedy-server). Set as the foreground completion block in host_script.
+        # `samba -i` in the foreground so a failed DC fails the container.
+        # Foreground completion block in host_script.
         return "exec /usr/local/bin/ad-app-start.sh"
     if host_type == 'windows-client':
         # RDP host supervisor: provisions the weak-cred account + planted root SSH key
