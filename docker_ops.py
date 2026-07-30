@@ -28,6 +28,10 @@ def start_topology(topology_id, force_rebuild=False):
     opencode_images = app.ensure_opencode_images(topology, force_rebuild=force_rebuild)
     app.ensure_slips_image(topology)
     app.ensure_repo_image(topology, force_rebuild=force_rebuild)
+    app.ensure_greedy_image(topology, force_rebuild=force_rebuild)
+    app.ensure_ad_image(topology, force_rebuild=force_rebuild)
+    app.ensure_rdp_image(topology, force_rebuild=force_rebuild)
+    app.ensure_web_image(topology, force_rebuild=force_rebuild)
 
     compose = app.generate_compose(topology, opencode_images)
     with open(app.compose_path(topology_id), 'w', encoding='utf8') as file:

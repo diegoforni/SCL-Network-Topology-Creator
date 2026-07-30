@@ -189,6 +189,13 @@ def host_script(topology, network, host, host_index, gateway):
     ip_addr = app.host_ip(network['cidr'], host_index)
     data_content = host.get('data_content') or default_data_for_host(topology, network, host)
     service_block = role_service_block(host['type'])
+    foreground_service_block = ''
+    if host['type'] in ('greedy-server', 'ad-server', 'windows-client', 'vuln-web-server'):
+        # The supervisor must become the container's foreground process so a failed
+        # stack/DC fails the container instead of being hidden behind `tail -f /dev/null`.
+        foreground_service_block = service_block
+        service_block = ''
+    completion_block = foreground_service_block or 'tail -f /dev/null'
     ssh_block = ''
     if host.get('ssh_enabled'):
         ssh_block = ssh_setup_block(host['username'], host['password'])
@@ -256,7 +263,7 @@ cp /srv/scl-data/README.txt /srv/files/share.txt || true
 {ssh_block}
 {agent_block}
 touch /tmp/scl-host-init-ready
-tail -f /dev/null
+{completion_block}
 """
 
 
@@ -290,6 +297,25 @@ def role_service_block(host_type):
         # The full app stack (MariaDB + Node backend + nginx/frontend) is baked
         # into the image; this supervisor brings it up. See repo-app-start.sh.
         return "bash /usr/local/bin/repo-app-start.sh >/var/log/repo-app.log 2>&1 &"
+    if host_type == 'greedy-server':
+        # The supervisor remains in the foreground so a failed stack makes the
+        # container fail instead of being hidden behind `tail -f /dev/null`.
+        return "exec /usr/local/bin/greedy-app-start.sh"
+    if host_type == 'ad-server':
+        # AD DC supervisor: provisions the Samba domain on first boot, then runs
+        # `samba -i` in the foreground so a failed DC fails the container (mirrors
+        # greedy-server). Set as the foreground completion block in host_script.
+        return "exec /usr/local/bin/ad-app-start.sh"
+    if host_type == 'windows-client':
+        # RDP host supervisor: provisions the weak-cred account + planted root SSH key
+        # on first boot, then runs `xrdp --nodaemon` in the foreground so a failed RDP
+        # host fails the container (mirrors ad-server). Foreground completion block.
+        return "exec /usr/local/bin/rdp-app-start.sh"
+    if host_type == 'vuln-web-server':
+        # Web host supervisor: provisions the weak-cred SSH account + win flag on first
+        # boot, then runs `lighttpd -D` in the foreground so a failed web host fails the
+        # container (mirrors ad-server/windows-client). Foreground completion block.
+        return "exec /usr/local/bin/web-app-start.sh"
     if host_type == 'file-server':
         return "python3 -m http.server 8080 -d /srv/files &"
     if host_type == 'db':

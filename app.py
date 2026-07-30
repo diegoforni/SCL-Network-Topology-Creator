@@ -98,6 +98,35 @@ REPO_HOST_IMAGE = 'scl-repo-host:0.1'
 REPO_HOST_URL = os.environ.get(
     'REPO_HOST_URL', 'https://github.com/JuanLoncharich/accion_del_sur'
 )
+# Dedicated image for `greedy-server` hosts — runs the ingSoftII "Greedy Cars"
+# (SCRUM/integrador) full-stack Java/Spring app. The monorepo is sparse-cloned
+# at build time (only SCRUM/integrador), so override the URL/subdir with env.
+GREEDY_HOST_IMAGE = 'scl-greedy-host:0.1'
+GREEDY_HOST_URL = os.environ.get(
+    'GREEDY_HOST_URL', 'https://github.com/r-baggioII/ingSoftII'
+)
+# Pin the external application to a tested revision.  This prevents an
+# unrelated upstream push from silently changing or breaking a topology build.
+GREEDY_HOST_REF = os.environ.get(
+    'GREEDY_HOST_REF', '9cab62a633d4ba23135a8febbb743088183896f6'
+)
+# Dedicated image for `ad-server` hosts — a Samba 4 AD DC emulating a Windows Active
+# Directory domain controller. It serves Kerberos/LDAP/SMB, exposes AS-REP roasting +
+# Kerberoasting, and holds a protected "passwords" data blob. The domain is provisioned
+# at first boot by the baked supervisor (see images/scl-ad-host/); no runtime egress needed.
+AD_HOST_IMAGE = 'scl-ad-host:0.1'
+# Dedicated image for `windows-client` hosts — a real RDP server (xrdp, speaks the
+# actual MS-RDP protocol) + Microsoft's real PowerShell (pwsh) on Linux, emulating a
+# Windows desktop client. Takeover = a predictable weak RDP credential -> become the
+# low-priv user -> read the planted root SSH key -> ssh in as root. Provisioned at first
+# boot by the baked supervisor (see images/scl-rdp-host/); no runtime egress needed.
+RDP_HOST_IMAGE = 'scl-rdp-host:0.1'
+# Dedicated image for `vuln-web-server` hosts — a lighttpd (:80) + sshd (:22) web host
+# carrying Shellshock (CVE-2014-6271): a CGI status script whose interpreter is a
+# deliberately-vulnerable old bash, so a single crafted HTTP header yields direct RCE
+# as the web user. Provisioned at first boot by the baked supervisor
+# (see images/scl-web-host/); no runtime egress needed.
+WEB_HOST_IMAGE = 'scl-web-host:0.1'
 
 # Map of base OS images to their OpenCode-enabled variants
 # Built dynamically by ensure_opencode_images()
@@ -155,6 +184,26 @@ HOST_TYPES = {
         'label': 'Repo server',
         'ports': ['80/tcp', '3001/tcp', '3306/tcp'],
         'description': 'Runs an external Git repo as a full-stack app (frontend on :80, Node API on :3001, MariaDB on :3306). Repo + config baked into the image at build time.',
+    },
+    'greedy-server': {
+        'label': 'Greedy Cars (integrador)',
+        'ports': ['80/tcp', '3306/tcp', '9000/tcp', '8080/tcp', '8081/tcp'],
+        'description': 'Runs the ingSoftII "Greedy Cars" full-stack Java/Spring app (MariaDB :3306 + greedy_cars API :9000 + institucional :8080 + client :8081, nginx front door :80). Repo baked into the image at build time.',
+    },
+    'ad-server': {
+        'label': 'Active Directory (Samba DC)',
+        'ports': ['53/tcp', '88/tcp', '135/tcp', '139/tcp', '389/tcp', '445/tcp', '464/tcp', '3268/tcp'],
+        'description': 'Windows Active Directory emulated with a Samba 4 AD DC. Serves Kerberos (:88), LDAP (:389), SMB (:445). Exposes AS-REP roasting + Kerberoasting and a protected passwords blob; domain provisioned at first boot.',
+    },
+    'windows-client': {
+        'label': 'Windows client (RDP + PowerShell)',
+        'ports': ['3389/tcp', '22/tcp'],
+        'description': 'Windows desktop client emulated with a real RDP server (xrdp :3389) + Microsoft PowerShell (pwsh). Carries a predictable weak RDP credential -> planted root SSH key -> ssh root; provisioned at first boot. Used for client_1/client_2.',
+    },
+    'vuln-web-server': {
+        'label': 'Web server (lighttpd + SSH, Shellshock RCE)',
+        'ports': ['80/tcp', '22/tcp'],
+        'description': 'Linux web host running lighttpd (:80, static site + a /cgi-bin/status.sh CGI) + sshd (:22, bash shell). Carries a common web-server RCE (Shellshock CVE-2014-6271): the CGI interpreter is a vulnerable old bash, so one crafted HTTP header yields direct RCE as the web user; weak SSH creds are a fallback. Provisioned at first boot.',
     },
 }
 

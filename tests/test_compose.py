@@ -62,6 +62,104 @@ def test_generate_compose_minimal_structure(minimal_topology):
     assert out['networks'][net_key]['name'].startswith('scl-topology-')
 
 
+def test_generate_compose_greedy_server_uses_greedy_image(make_topology):
+    """A greedy-server host must select the dedicated greedy-host image (not the
+    plain BASE_IMAGE / opencode variant)."""
+    spec = {
+        "name": "Greedy Lab",
+        "networks": [
+            {
+                "id": "net1", "name": "Net One", "cidr": "10.77.1.0/24",
+                "internet": True,
+                "hosts": [
+                    {"id": "g1", "name": "greedy", "type": "greedy-server"},
+                ],
+            }
+        ],
+    }
+    topo = make_topology(spec, topo_id="greedy-lab")
+    out = app.generate_compose(topo)
+    service = out['services']['net1-g1']
+    assert service['image'] == app.GREEDY_HOST_IMAGE
+    assert service['restart'] == 'unless-stopped'
+    assert service['env_file'] == ['../../greedy.env']
+    assert service['volumes'] == [
+        'greedy-data-net1-g1:/var/lib/mysql'
+    ]
+    assert out['volumes']['greedy-data-net1-g1']['name'] == (
+        'scl-topology-greedy-lab-net1-g1-mysql-data'
+    )
+    assert service['healthcheck']['test'] == [
+        'CMD', '/usr/local/bin/greedy-healthcheck.sh'
+    ]
+    assert 'exec /usr/local/bin/greedy-app-start.sh' in service['command'][2]
+    assert service['command'][2].index('touch /tmp/scl-host-init-ready') < (
+        service['command'][2].index('exec /usr/local/bin/greedy-app-start.sh')
+    )
+
+
+def test_generate_compose_windows_client_uses_rdp_image(make_topology):
+    """A windows-client host must select the dedicated RDP-host image (not the plain
+    BASE_IMAGE / opencode variant), carry the :3389 readiness healthcheck, and run the
+    RDP supervisor as its foreground completion block."""
+    spec = {
+        "name": "RDP Client Lab",
+        "networks": [
+            {
+                "id": "net1", "name": "Net One", "cidr": "10.77.1.0/24",
+                "internet": True,
+                "hosts": [
+                    {"id": "c1", "name": "client1", "type": "windows-client"},
+                ],
+            }
+        ],
+    }
+    topo = make_topology(spec, topo_id="rdp-lab")
+    out = app.generate_compose(topo)
+    service = out['services']['net1-c1']
+    assert service['image'] == app.RDP_HOST_IMAGE
+    # :3389 readiness healthcheck is wired (same shape as the ad-server probe).
+    assert service['healthcheck']['test'] == [
+        'CMD', 'bash', '-lc', 'nc -w1 -z 127.0.0.1 3389 >/dev/null 2>&1'
+    ]
+    # The RDP supervisor is the foreground completion block (mirrors ad-server).
+    assert 'exec /usr/local/bin/rdp-app-start.sh' in service['command'][2]
+    assert service['command'][2].index('touch /tmp/scl-host-init-ready') < (
+        service['command'][2].index('exec /usr/local/bin/rdp-app-start.sh')
+    )
+
+
+def test_generate_compose_vuln_web_server_uses_web_image(make_topology):
+    """A vuln-web-server host must select the dedicated web-host image (not the plain
+    BASE_IMAGE / opencode variant), carry the :80 readiness healthcheck, and run the
+    web supervisor as its foreground completion block."""
+    spec = {
+        "name": "Web Shellshock Lab",
+        "networks": [
+            {
+                "id": "net1", "name": "Net One", "cidr": "10.77.1.0/24",
+                "internet": True,
+                "hosts": [
+                    {"id": "w1", "name": "web1", "type": "vuln-web-server"},
+                ],
+            }
+        ],
+    }
+    topo = make_topology(spec, topo_id="web-lab")
+    out = app.generate_compose(topo)
+    service = out['services']['net1-w1']
+    assert service['image'] == app.WEB_HOST_IMAGE
+    # :80 readiness healthcheck is wired (same shape as the ad-server/windows-client probe).
+    assert service['healthcheck']['test'] == [
+        'CMD', 'bash', '-lc', 'nc -w1 -z 127.0.0.1 80 >/dev/null 2>&1'
+    ]
+    # The web supervisor is the foreground completion block (mirrors ad-server/windows-client).
+    assert 'exec /usr/local/bin/web-app-start.sh' in service['command'][2]
+    assert service['command'][2].index('touch /tmp/scl-host-init-ready') < (
+        service['command'][2].index('exec /usr/local/bin/web-app-start.sh')
+    )
+
+
 def test_generate_compose_rich_golden(rich_topology, golden):
     out = app.generate_compose(rich_topology)
     golden('compose_rich.json', _normalize_compose(out))
