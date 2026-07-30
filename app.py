@@ -98,18 +98,6 @@ REPO_HOST_IMAGE = 'scl-repo-host:0.1'
 REPO_HOST_URL = os.environ.get(
     'REPO_HOST_URL', 'https://github.com/JuanLoncharich/accion_del_sur'
 )
-# Dedicated image for `greedy-server` hosts — runs the ingSoftII "Greedy Cars"
-# (SCRUM/integrador) full-stack Java/Spring app. The monorepo is sparse-cloned
-# at build time (only SCRUM/integrador), so override the URL/subdir with env.
-GREEDY_HOST_IMAGE = 'scl-greedy-host:0.1'
-GREEDY_HOST_URL = os.environ.get(
-    'GREEDY_HOST_URL', 'https://github.com/r-baggioII/ingSoftII'
-)
-# Pin the external application to a tested revision.  This prevents an
-# unrelated upstream push from silently changing or breaking a topology build.
-GREEDY_HOST_REF = os.environ.get(
-    'GREEDY_HOST_REF', '9cab62a633d4ba23135a8febbb743088183896f6'
-)
 # Dedicated image for `ad-server` hosts — a Samba 4 AD DC emulating a Windows Active
 # Directory domain controller. It serves Kerberos/LDAP/SMB, exposes AS-REP roasting +
 # Kerberoasting, and holds a protected "passwords" data blob. The domain is provisioned
@@ -184,11 +172,6 @@ HOST_TYPES = {
         'label': 'Repo server',
         'ports': ['80/tcp', '3001/tcp', '3306/tcp'],
         'description': 'Runs an external Git repo as a full-stack app (frontend on :80, Node API on :3001, MariaDB on :3306). Repo + config baked into the image at build time.',
-    },
-    'greedy-server': {
-        'label': 'Greedy Cars (integrador)',
-        'ports': ['80/tcp', '3306/tcp', '9000/tcp', '8080/tcp', '8081/tcp'],
-        'description': 'Runs the ingSoftII "Greedy Cars" full-stack Java/Spring app (MariaDB :3306 + greedy_cars API :9000 + institucional :8080 + client :8081, nginx front door :80). Repo baked into the image at build time.',
     },
     'ad-server': {
         'label': 'Active Directory (Samba DC)',

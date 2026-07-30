@@ -178,13 +178,11 @@ def generate_compose(topology, opencode_images=None):
             host_has_agents = bool(app.host_agents(host))
             host_base_image = host.get('image', 'ubuntu:24.04')
 
-            # Dynamic image selection: repo-server / greedy-server / ad-server hosts
-            # use their dedicated image (full-stack app / Samba AD DC); agent hosts
-            # use their OpenCode variant; everything else uses the plain base image.
+            # Dynamic image selection: repo-server / ad-server hosts use their
+            # dedicated image (full-stack app / Samba AD DC); agent hosts use their
+            # OpenCode variant; everything else uses the plain base image.
             if host.get('type') == 'repo-server':
                 host_image = app.REPO_HOST_IMAGE
-            elif host.get('type') == 'greedy-server':
-                host_image = app.GREEDY_HOST_IMAGE
             elif host.get('type') == 'ad-server':
                 host_image = app.AD_HOST_IMAGE
             elif host.get('type') == 'windows-client':
@@ -215,28 +213,6 @@ def generate_compose(topology, opencode_images=None):
 
             # Attach all hosts to scl-playground-net for SCL service connectivity
             service_config['networks']['scl-playground-net'] = {}
-
-            if host.get('type') == 'greedy-server':
-                service_config['restart'] = 'unless-stopped'
-                volume_key = f'greedy-data-{service_name}'
-                volume_name = f'{project_prefix}-{service_name}-mysql-data'
-                compose.setdefault('volumes', {})[volume_key] = {
-                    'name': volume_name,
-                }
-                service_config['volumes'] = [
-                    f'{volume_key}:/var/lib/mysql',
-                ]
-                # Read service credentials from a protected file under data/.
-                # This path is relative to data/topologies/<topology-id>/,
-                # keeping secrets out of generated compose JSON and the repo.
-                service_config['env_file'] = ['../../greedy.env']
-                service_config['healthcheck'] = {
-                    'test': ['CMD', '/usr/local/bin/greedy-healthcheck.sh'],
-                    'interval': '10s',
-                    'timeout': '5s',
-                    'retries': 12,
-                    'start_period': '180s',
-                }
 
             if host.get('type') == 'ad-server':
                 # The Samba AD DC provisions on first boot (~15-60s) before `samba -i`
