@@ -12,14 +12,18 @@ table inet filter {
     ip saddr 10.77.1.0/24 oifname "$$wan_if" accept
   }
 }
+EOF
 
+if [ -n "$$wan_if" ]; then
+cat >> /tmp/router-rules.nft <<EOF2
 table ip nat {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "$$wan_if" masquerade
   }
 }
-EOF
-nft -f /tmp/router-rules.nft || true
+EOF2
+fi
+nft -f /tmp/router-rules.nft || echo "WARN: nft ruleset load failed" >&2
 
     tail -f /dev/null
