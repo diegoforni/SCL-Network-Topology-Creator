@@ -1,0 +1,5 @@
+Owner: User1
+Classification: internal
+
+Backup credentials bundle for the legacy reporting service.
+Rotate before reuse — kept here only for the migration window.

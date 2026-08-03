@@ -1,0 +1,124 @@
+{
+  "preset_id": "two-networks-tiny",
+  "preset_name": "Two Networks Tiny",
+  "preset_version": "1.0.0",
+  "description": "Minimal cyber range: one client, one file server, one external C&C host, replicating NetSecGame's two_networks_tiny scenario shape.",
+  "tags": ["training", "minimal", "netsecgame"],
+  "readonly": true,
+  "network_count": 3,
+  "host_count": 3,
+  "topology": {
+    "name": "Two Networks Tiny",
+    "status": "draft",
+    "networks": [
+      {
+        "id": "client",
+        "name": "Client Network",
+        "cidr": "10.10.10.0/24",
+        "internet": false,
+        "router_ids": ["router1"],
+        "default_router_id": "router1",
+        "router_id": "router1",
+        "hosts": [
+          {
+            "id": "client-host",
+            "name": "client-host",
+            "type": "normal-user",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": true,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "privesc_nopasswd": true
+          }
+        ]
+      },
+      {
+        "id": "server",
+        "name": "Server Network",
+        "cidr": "10.10.20.0/24",
+        "internet": false,
+        "router_ids": ["router1"],
+        "default_router_id": "router1",
+        "router_id": "router1",
+        "hosts": [
+          {
+            "id": "file-server",
+            "name": "file-server",
+            "type": "smb-server",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": true,
+            "username": "student",
+            "password": "strato",
+            "generate_data": true,
+            "data_prompt": "Sensitive company financial records",
+            "data_content": "",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": []
+          }
+        ]
+      },
+      {
+        "id": "cnc",
+        "name": "C&C Network",
+        "cidr": "213.47.23.0/24",
+        "internet": false,
+        "router_ids": ["router1"],
+        "default_router_id": "router1",
+        "router_id": "router1",
+        "hosts": [
+          {
+            "id": "cnc-host",
+            "name": "cnc-host",
+            "type": "exfil-listener",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "213.47.23.195"
+          }
+        ]
+      }
+    ],
+    "router": {
+      "ssh_enabled": false,
+      "username": "admin",
+      "password": "strato",
+      "firewall": {
+        "allowed": ["client->server", "client->cnc"]
+      }
+    },
+    "routers": [
+      {
+        "id": "router1",
+        "name": "core",
+        "parent_router_id": "",
+        "ssh_enabled": false,
+        "username": "admin",
+        "password": "strato"
+      }
+    ],
+    "infrastructure": {
+      "hackerlab_network_id": "client"
+    },
+    "monitoring": {
+      "slips": {
+        "enabled": false,
+        "capture_source": "router1",
+        "defender_enabled": true
+      }
+    }
+  }
+}
