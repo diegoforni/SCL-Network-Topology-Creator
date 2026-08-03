@@ -88,6 +88,9 @@ HOST = '0.0.0.0'
 PORT = 9002
 DATA_DIR = Path(os.environ.get('TOPOLOGY_DATA_DIR', '/app/data'))
 TOPOLOGIES_DIR = DATA_DIR / 'topologies'
+# Preset topologies ship with the plugin code (read-only, version-controlled),
+# not on the runtime data volume. Overridable for tests/deployment.
+PRESETS_DIR = Path(os.environ.get('TOPOLOGY_PRESETS_DIR', str(Path(__file__).resolve().parent / 'presets')))
 BASE_IMAGE = 'scl-plugin-network-topology-ubuntu:0.1'
 OPENCODE_IMAGE = 'scl-plugin-network-topology-ubuntu-opencode:0.1'
 SLIPS_IMAGE = 'scl-slips-sensor:0.1'
@@ -115,6 +118,10 @@ RDP_HOST_IMAGE = 'scl-rdp-host:0.1'
 # as the web user. Provisioned at first boot by the baked supervisor
 # (see images/scl-web-host/); no runtime egress needed.
 WEB_HOST_IMAGE = 'scl-web-host:0.1'
+# Dedicated image for `smb-server` hosts — Samba baked in at build time (the
+# package install needs host-side internet access, which an isolated,
+# non-internet topology subnet doesn't have at container-runtime).
+SMB_HOST_IMAGE = 'scl-smb-server:0.1'
 
 # Map of base OS images to their OpenCode-enabled variants
 # Built dynamically by ensure_opencode_images()
@@ -187,6 +194,16 @@ HOST_TYPES = {
         'label': 'Web server (lighttpd + SSH, Shellshock RCE)',
         'ports': ['80/tcp', '22/tcp'],
         'description': 'Linux web host running lighttpd (:80, static site + a /cgi-bin/status.sh CGI) + sshd (:22, bash shell). Carries a common web-server RCE (Shellshock CVE-2014-6271): the CGI interpreter is a vulnerable old bash, so one crafted HTTP header yields direct RCE as the web user; weak SSH creds are a fallback. Provisioned at first boot.',
+    },
+    'smb-server': {
+        'label': 'SMB server (vulnerable)',
+        'ports': ['445/tcp', '139/tcp'],
+        'description': 'Samba file share deliberately misconfigured (anonymous guest access, world-writable share) so it is exploitable without any authentication, holding seeded private data.',
+    },
+    'exfil-listener': {
+        'label': 'Exfil listener',
+        'ports': [],
+        'description': 'Attacker-controlled listener that receives and stores exfiltrated data — no auth, no vulnerability, it is already attacker-owned.',
     },
 }
 

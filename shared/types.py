@@ -6,6 +6,7 @@ networks, hosts, and routers. They are used across different components
 of the plugin for validation and serialization.
 """
 
+import ipaddress
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator
@@ -78,6 +79,22 @@ class Host(BaseModel):
         default_factory=list,
         description="List of OpenCode agents assigned to this host"
     )
+    ip_override: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional static IPv4 address to assign this host instead of the "
+            "computed array-index IP. Must fall inside the host's network CIDR "
+            "so Docker can assign it on the bridge."
+        )
+    )
+    agent_config: Dict[str, Dict[str, str]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-assignment agent config, parallel to `agents`: maps an "
+            "agent_type to {system_prompt, goal}. Written by the agent-manager "
+            "and injected into the OpenCode agent profile at compose time."
+        )
+    )
 
     # Legacy fields for compatibility
     agent_enabled: Optional[bool] = Field(
@@ -86,6 +103,18 @@ class Host(BaseModel):
     agent_type: Optional[str] = Field(
         default=None, description="Legacy: single agent type"
     )
+
+    @field_validator("ip_override")
+    @classmethod
+    def validate_ip_override(cls, v: Optional[str]) -> Optional[str]:
+        """Ensure ip_override, when present, is a valid IPv4 address string."""
+        if v is None or v == "":
+            return None
+        try:
+            ipaddress.IPv4Address(v)
+        except (ipaddress.AddressValueError, ValueError) as exc:
+            raise ValueError(f"ip_override must be a valid IPv4 address: {v!r}") from exc
+        return v
 
 
 class Network(BaseModel):
