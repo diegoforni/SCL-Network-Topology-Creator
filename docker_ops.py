@@ -31,6 +31,7 @@ def start_topology(topology_id, force_rebuild=False):
     app.ensure_ad_image(topology, force_rebuild=force_rebuild)
     app.ensure_rdp_image(topology, force_rebuild=force_rebuild)
     app.ensure_web_image(topology, force_rebuild=force_rebuild)
+    app.ensure_smb_image(topology, force_rebuild=force_rebuild)
 
     compose = app.generate_compose(topology, opencode_images)
     with open(app.compose_path(topology_id), 'w', encoding='utf8') as file:
@@ -154,6 +155,63 @@ def sync_hackerlab_runtime(topology):
     docker_run(['network', 'connect', '--ip', hacker_ip, selected_network_name, container_name])
     docker_run(['exec', container_name, 'sh', '-lc', f'ip route replace default via {gateway_ip} || true'])
     return {'status': 'updated', 'network': selected_network_name}
+
+
+def recreate_host(topology_id, host_id, force_rebuild=False):
+    """Regenerate compose and recreate a single host's container in place.
+
+    This is the canonical entry point used by the agent-manager plugin after it
+    mutates a host's `agents` list: because this plugin owns the topology's
+    docker-compose file, the Docker socket, and the per-host OpenCode image
+    build, the recreation must happen here (the agent-manager has no local
+    compose file). Only the one host's service is recreated (--no-deps,
+    --force-recreate); the rest of the topology is left running.
+
+    Returns a dict with 'status' one of: 'recreated' (container rebuilt),
+    'skipped' (topology not running — compose is regenerated so the change
+    applies on next start), or raises on error.
+    """
+    path = app.topology_path(topology_id)
+    if not path.exists():
+        raise FileNotFoundError(f"Topology '{topology_id}' not found.")
+    topology = app.read_json(path)
+
+    service_name = None
+    for network in topology.get('networks', []):
+        for host in network.get('hosts', []):
+            if host.get('id') == host_id:
+                service_name = f'{network["id"]}-{host_id}'
+                break
+        if service_name:
+            break
+    if not service_name:
+        raise KeyError(f"Host '{host_id}' not found in topology '{topology_id}'.")
+
+    if not is_running(topology_id):
+        return {
+            'status': 'skipped',
+            'service': service_name,
+            'message': 'Topology is not running; compose regenerated, change applies on next start.',
+        }
+
+    app.ensure_base_image()
+    if os.environ.get('FORCE_REBUILD_IMAGES', '').lower() in ('1', 'true', 'yes'):
+        force_rebuild = True
+    opencode_images = app.ensure_opencode_images(topology, force_rebuild=force_rebuild)
+    app.ensure_slips_image(topology)
+
+    compose = app.generate_compose(topology, opencode_images)
+    with open(app.compose_path(topology_id), 'w', encoding='utf8') as file:
+        json.dump(compose, file, indent=2)
+        file.write('\n')
+
+    run_compose(topology_id, ['up', '-d', '--force-recreate', '--no-deps', service_name])
+
+    return {
+        'status': 'recreated',
+        'service': service_name,
+        'container': f'scl-topology-{topology_id}-{service_name}',
+    }
 
 
 def is_running(topology_id):
