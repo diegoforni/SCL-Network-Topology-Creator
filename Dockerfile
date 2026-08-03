@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # scripts/images/compose/docker_ops/topology_model/http_handlers/server.py).
 COPY *.py ./
 COPY shared/ ./shared/
+COPY presets/ ./presets/
 COPY templates/ ./templates/
 COPY static/ ./static/
 
