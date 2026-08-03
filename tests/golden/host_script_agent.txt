@@ -1,5 +1,7 @@
 set -eu
-ip route replace default via 10.77.20.254 || true
+ip route replace default via 10.77.20.254 || echo "WARN: failed to set default route via 10.77.20.254" >&2
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 8.8.4.4" >> /etc/resolv.conf
 mkdir -p /srv/scl-data /srv/www /srv/files /srv/db /var/log/scl /tmp/agents
 cat > /etc/scl-host.json <<'JSON'
 {
@@ -21,6 +23,7 @@ DATA
 cp /srv/scl-data/README.txt /srv/www/index.txt || true
 cp /srv/scl-data/README.txt /srv/files/share.txt || true
 :
+
 
 
 # OpenCode Agent Initialization for: coder56

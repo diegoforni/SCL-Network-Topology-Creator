@@ -9,7 +9,14 @@ def router_ip(cidr):
     return f'{subnet_prefix(cidr)}.254'
 
 
-def host_ip(cidr, host_index):
+def host_ip(cidr, host_index, host=None):
+    # A host may pin a static address via ip_override (must be inside the
+    # network CIDR so Docker can assign it on the bridge). Fall back to the
+    # deterministic array-index scheme otherwise.
+    if host:
+        override = str(host.get('ip_override') or '').strip()
+        if override:
+            return override
     return f'{subnet_prefix(cidr)}.{10 + host_index}'
 
 

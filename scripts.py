@@ -11,24 +11,53 @@ echo {app.shell_quote(username + ':' + password)} | chpasswd || true
 """
 
 
+def host_agent_config(host, agent_type):
+    """Per-assignment config for one agent on a host.
+
+    Lives in the parallel ``host['agent_config']`` map ({agent_type: {system_prompt,
+    goal}}) written by the agent-manager, kept separate from the ``host['agents']``
+    type list so existing List[str] readers are unaffected. Returns {} if absent.
+    """
+    cfg = host.get('agent_config')
+    if isinstance(cfg, dict):
+        entry = cfg.get(agent_type)
+        if isinstance(entry, dict):
+            return entry
+    return {}
+
+
 def opencode_agent_block(host, topology):
     """Generate the OpenCode agent initialization block for a host."""
     agents = app.host_agents(host)
     print(f"🔍 opencode_agent_block: host={host.get('name')}, agents={agents}, generate_opencode_config={app.generate_opencode_config is not None}")
-    if not agents or not app.generate_opencode_config:
-        print(f"⚠️ opencode_agent_block returning empty: agents={agents}, generate_opencode_config={app.generate_opencode_config}")
+    if not agents:
         return ''
 
-    # Generate agent configurations for all agents
+    # Generate agent configurations for all agents, injecting the per-assignment
+    # system_prompt (prepended) and goal (appended) supplied by the researcher.
+    # The persona template (generate_opencode_config) is optional: when it is
+    # unavailable we still emit a config carrying the researcher's system_prompt
+    # and goal, so agent assignment remains functional without it.
     agent_configs = {}
     for agent_type in agents:
-        try:
-            agent_config = app.generate_opencode_config(agent_type)
-            agent_configs[agent_type] = agent_config.get('system', {}).get('prompt', 'You are a helpful assistant.')
-            print(f"✅ Generated config for agent {agent_type}")
-        except (ValueError, KeyError) as e:
-            agent_configs[agent_type] = f'# Error generating config for {agent_type}: {e}'
-            print(f"❌ Error generating config for {agent_type}: {e}")
+        base_prompt = f'You are the "{agent_type}" agent operating on this host.'
+        if app.generate_opencode_config:
+            try:
+                agent_config = app.generate_opencode_config(agent_type)
+                base_prompt = agent_config.get('system', {}).get('prompt', base_prompt)
+                print(f"✅ Generated config for agent {agent_type}")
+            except (ValueError, KeyError) as e:
+                base_prompt = f'# Error generating config for {agent_type}: {e}'
+                print(f"❌ Error generating config for {agent_type}: {e}")
+        cfg = host_agent_config(host, agent_type)
+        system_prompt = str(cfg.get('system_prompt') or '').strip()
+        goal = str(cfg.get('goal') or '').strip()
+        prompt = base_prompt
+        if system_prompt:
+            prompt = f"{system_prompt}\n\n{prompt}"
+        if goal:
+            prompt = f"{prompt}\n\n## Assignment goal\n{goal}"
+        agent_configs[agent_type] = prompt
 
     # Guardrail: guarded agents keep the built-in bash exposed. The executor-side
     # plugin intercepts it through tool.execute.before and delegates adjudication
@@ -186,7 +215,7 @@ echo "OpenCode agents configured: {agents_label}"
 
 def host_script(topology, network, host, host_index, gateway):
     role = app.HOST_TYPES[host['type']]['label']
-    ip_addr = app.host_ip(network['cidr'], host_index)
+    ip_addr = app.host_ip(network['cidr'], host_index, host)
     data_content = host.get('data_content') or default_data_for_host(topology, network, host)
     service_block = role_service_block(host['type'])
     foreground_service_block = ''
@@ -200,6 +229,17 @@ def host_script(topology, network, host, host_index, gateway):
     if host.get('ssh_enabled'):
         ssh_block = ssh_setup_block(host['username'], host['password'])
 
+    # Deliberate control-enabling misconfig (weak/leaked-creds-plus-privesc
+    # model, matching NetSecGame's LIMITED-login -> ELEVATED-admin split): a
+    # realistic passwordless-sudo grant on a shell, not a blanket ALL=NOPASSWD:ALL.
+    privesc_block = ''
+    if host.get('privesc_nopasswd') and host.get('ssh_enabled'):
+        privesc_block = (
+            f"echo {app.shell_quote(host['username'] + ' ALL=(ALL) NOPASSWD: /bin/sh')} "
+            "> /etc/sudoers.d/scl-privesc\n"
+            "chmod 440 /etc/sudoers.d/scl-privesc"
+        )
+
     # Add OpenCode agent block if configured
     agent_block = ''
     agents_list = app.host_agents(host)
@@ -211,42 +251,33 @@ def host_script(topology, network, host, host_index, gateway):
     else:
         print(f"ℹ️ No agents configured for host {host['name']}")
 
-    # Internet access configuration.
-    # Hosts are dual-homed: their topology subnet + scl-playground-net. We keep the
-    # own subnet on-link, send the DEFAULT route to the playground for internet
-    # egress, and route every OTHER topology subnet via the router gateway so that
-    # inter-subnet traffic traverses the router (where SLIPS captures it) instead of
-    # leaking out the playground default to the Docker host (which has no path to the
-    # containers' topology addresses and makes cross-subnet targets show "filtered").
-    sibling_cidrs = [n['cidr'] for n in topology['networks'] if n.get('id') != network['id']]
-    sibling_routes = ''.join(
-        f'ip route replace {cidr} via {gateway} dev "$$topo_if" || true\n'
-        for cidr in sibling_cidrs
+    # Network configuration: every host is single-NIC on its own topology subnet.
+    # "Everything not on my subnet" (including internet-bound traffic for
+    # internet-enabled networks) is sent to the router's gateway IP, so ALL
+    # off-subnet traffic traverses the router — where the firewall is enforced,
+    # SLIPS captures, and (for internet-enabled networks) the root router NATs
+    # out via its egress interface. Hosts never get a second interface, so `ip a`
+    # inside a host looks like a normal LAN client behind a home router.
+    # Single default route via the router for EVERY host (agent or not). The host
+    # is single-NIC on its internal bridge; the router is its only way off-subnet,
+    # for both sibling subnets and the internet. The router forwards + NATs
+    # internet-bound traffic out its egress interface, so an agent's LLM/recon/exfil
+    # all traverse the router (monitored, firewalled) with no out-of-band path.
+    internet_config = (
+        f'ip route replace default via {gateway} '
+        f'|| echo "WARN: failed to set default route via {gateway}" >&2'
     )
-    internet_config = ''
-    if network.get('internet'):
-        # Detect interfaces by address: Docker's eth0/eth1 ordering is NOT guaranteed
-        # across dual-homed containers (topology subnet vs scl-playground-net swap per
-        # host), so identify the topology iface by the host's own IP and the playground
-        # iface as the other inet interface.
-        internet_config = f'''
-# Configure internet access via scl-playground-net + route sibling subnets via router
-topo_if="$$(ip -o -f inet addr show | awk -v ip='{ip_addr}' '$$2!="lo" && $$4 ~ ip"/" {{print $$2; exit}}')"
-pg_if="$$(ip -o -f inet addr show | awk -v t="$$topo_if" '$$2!="lo" && $$2!=t {{print $$2; exit}}')"
-pg_gw="$$(ip route show default dev "$$pg_if" 2>/dev/null | awk '{{print $$3; exit}}')"
-if [ -n "$$pg_gw" ]; then
-    ip route replace default via "$$pg_gw" dev "$$pg_if" || true
-fi
-# Own subnet stays on-link via the topology interface.
-ip route replace {network['cidr']} dev "$$topo_if" || true
-# Route every other topology subnet via the router gateway on this subnet.
-{sibling_routes}# Configure DNS to use public DNS servers
-echo "nameserver 8.8.8.8" > /etc/resolv.conf
-echo "nameserver 8.8.4.4" >> /etc/resolv.conf
-'''
-    else:
-        # For isolated networks, default via router (already routes sibling subnets).
-        internet_config = f'ip route replace default via {gateway} || true'
+    # DNS: hosts that reach the internet (an internet-enabled network OR an agent
+    # host, both now routed out via the router) point at a public resolver — an
+    # internal bridge cannot use Docker's embedded resolver (127.0.0.11) for
+    # external names, and the query itself goes out through the router's NAT.
+    # Fully-isolated hosts keep the embedded resolver so sibling container names
+    # still resolve.
+    if network.get('internet') or agents_list:
+        internet_config += (
+            '\necho "nameserver 8.8.8.8" > /etc/resolv.conf'
+            '\necho "nameserver 8.8.4.4" >> /etc/resolv.conf'
+        )
 
     return f"""set -eu
 {internet_config.strip()}
@@ -261,6 +292,7 @@ cp /srv/scl-data/README.txt /srv/www/index.txt || true
 cp /srv/scl-data/README.txt /srv/files/share.txt || true
 {service_block}
 {ssh_block}
+{privesc_block}
 {agent_block}
 touch /tmp/scl-host-init-ready
 {completion_block}
@@ -319,6 +351,17 @@ def role_service_block(host_type):
         return "sqlite3 /srv/db/app.db 'create table if not exists notes(id integer primary key, body text);' || true"
     if host_type == 'log-server':
         return "cp /srv/scl-data/README.txt /var/log/scl/training.log || true"
+    if host_type == 'smb-server':
+        # Samba + the seeded share are baked into the image at build time (see
+        # images/scl-smb-server/); this only starts the already-configured,
+        # deliberately-insecure (guest ok, world-writable) daemons.
+        return "mkdir -p /run/samba\nsmbd --foreground --no-process-group &\nnmbd --foreground --no-process-group &"
+    if host_type == 'exfil-listener':
+        # Faithful, concrete stand-in for NetSecGame's abstract `listener`
+        # placeholder service: a real, unauthenticated TCP listener that stores
+        # whatever it receives. `-k` (OpenBSD nc) keeps accepting connections
+        # after each one closes, so repeated exfil attempts all land.
+        return "mkdir -p /srv/exfil\nnc -lk -p 4444 >> /srv/exfil/received.log 2>>/var/log/exfil-listener.log &"
     return ":"
 
 
@@ -326,8 +369,13 @@ def router_script(topology, router, descendant_networks, child_routes, transit_s
     allowed_pairs = set(topology.get('router', {}).get('firewall', {}).get('allowed', []))
     forward_rules = []
     if is_root:
+        # Permit egress out the WAN (egress) interface for any subnet that needs the
+        # outside world: an internet-enabled network, OR a network carrying an agent
+        # (which must reach its LLM). This blanket allow is the single place egress
+        # is governed — tighten it to a destination allowlist (e.g. only the LLM
+        # API + package mirrors) here for controlled egress.
         for network in descendant_networks:
-            if network.get('internet'):
+            if network.get('internet') or any(app.host_agents(h) for h in network.get('hosts', [])):
                 forward_rules.append(f"ip saddr {network['cidr']} oifname \"$$wan_if\" accept")
         for subnet in transit_subnets:
             forward_rules.append(f"ip saddr {subnet} oifname \"$$wan_if\" accept")
@@ -349,13 +397,24 @@ def router_script(topology, router, descendant_networks, child_routes, transit_s
         route_lines.append(':')
     forward_block = '\n    '.join(forward_rules)
     route_block = '\n'.join(route_lines)
+    # NAT is only meaningful (and only syntactically valid) once wan_if actually
+    # resolves to an interface. On a root router with no internet-enabled network
+    # there is no egress attachment, so `ip route show default` returns nothing —
+    # emitting `oifname "" masquerade` unconditionally would be invalid nftables
+    # syntax and abort the ENTIRE `nft -f` load (not just the NAT table), silently
+    # disabling the forward-chain DROP policy too. Guarded at runtime instead of
+    # compose time so it degrades safely regardless of how routing resolves.
     nat_block = """
+if [ -n "$$wan_if" ]; then
+cat >> /tmp/router-rules.nft <<EOF2
 table ip nat {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "$$wan_if" masquerade
   }
 }
+EOF2
+fi
 """ if is_root else ''
     # SLIPS capture: if this router is the monitoring capture_source, dump pcaps
     # (rotated every 30s, excluding the OpenCode API port) to /pcaps. Rotation
@@ -399,8 +458,8 @@ table inet filter {{
     {forward_block}
   }}
 }}
-{nat_block}EOF
-nft -f /tmp/router-rules.nft || true
+EOF
+{nat_block}nft -f /tmp/router-rules.nft || echo "WARN: nft ruleset load failed" >&2
 {capture_block}
     tail -f /dev/null
 """

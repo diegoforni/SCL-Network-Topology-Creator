@@ -51,15 +51,19 @@ def build_opencode_image(base_image, opencode_image):
     """
     print(f"🔨 Building OpenCode image: {opencode_image} from {base_image}")
 
-    # SCL's BASE_IMAGE is built from python:3.12-alpine (Alpine-based)
-    # This is a known fact from the Dockerfile
-    BASE_IMAGE_IS_ALPINE = True  # scl-plugin-network-topology-ubuntu:0.1 uses python:3.12-alpine
+    # SCL's BASE_IMAGE is genuinely Ubuntu (confirmed via /etc/os-release —
+    # scl-plugin-network-topology-ubuntu:0.1 is NOT Alpine, despite the stale
+    # comment this replaced). Getting this wrong sends the build down the
+    # apk/wget path on a system with neither, which no-ops silently (every apk
+    # RUN line ends in `|| true`) and produces an image with NO opencode binary
+    # while still reporting a successful build.
+    BASE_IMAGE_IS_ALPINE = False
 
     # Determine foundation image and what needs to be added
     if base_image.startswith(('ubuntu:', 'debian:')):
         # Use SCL BASE_IMAGE to automatically inherit SCL packages
         foundation_image = app.BASE_IMAGE
-        print(f"   Foundation: {app.BASE_IMAGE} (Alpine-based, will inherit SCL packages)")
+        print(f"   Foundation: {app.BASE_IMAGE} (Ubuntu-based, will inherit SCL packages)")
         needs_scl_packages = False  # Already in BASE_IMAGE
         foundation_is_alpine = BASE_IMAGE_IS_ALPINE
     else:
@@ -314,6 +318,42 @@ def ensure_slips_image(topology):
     if build.returncode != 0:
         raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.SLIPS_IMAGE}')
     print(f"✅ Built SLIPS image: {app.SLIPS_IMAGE}")
+
+
+def ensure_smb_image(topology, force_rebuild=False):
+    """Build the smb-server image if any host is an `smb-server`.
+
+    Samba is installed at BUILD time (host-side docker daemon, real internet)
+    rather than at container runtime, because an `smb-server` host typically
+    lives on a non-internet-enabled topology subnet and has no egress to reach
+    apt repos once running. Mirrors ensure_repo_image's build-from-context
+    pattern.
+    """
+    has_smb_host = any(
+        host.get('type') == 'smb-server'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_smb_host:
+        return
+
+    if not force_rebuild:
+        result = subprocess.run(['docker', 'image', 'inspect', app.SMB_HOST_IMAGE], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ SMB-server image exists: {app.SMB_HOST_IMAGE}")
+            return
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-smb-server'
+    if not context.exists():
+        raise RuntimeError(f'SMB-server image build context not found: {context}')
+    print(f"🔨 Building SMB-server image: {app.SMB_HOST_IMAGE} from {context}")
+    build = subprocess.run(
+        ['docker', 'build', '-t', app.SMB_HOST_IMAGE, str(context)],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.SMB_HOST_IMAGE}')
+    print(f"✅ Built SMB-server image: {app.SMB_HOST_IMAGE}")
 
 
 def ensure_repo_image(topology, force_rebuild=False):

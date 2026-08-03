@@ -1,3 +1,5 @@
+import copy
+import ipaddress
 import json
 import uuid
 
@@ -43,6 +45,51 @@ def validate_topology(topology):
             host['agent_enabled'] = bool(host.get('agent_enabled', False))
             host['agent_type'] = str(host.get('agent_type', '') or '')
             host['agents'] = app.host_agents(host)
+            # Deliberate control-enabling misconfig flag (passwordless-sudo
+            # privesc) — see scripts.py::host_script.
+            host['privesc_nopasswd'] = bool(host.get('privesc_nopasswd'))
+            # Optional static IP. Must be a valid IPv4 inside the network CIDR,
+            # otherwise Docker refuses to assign it on the bridge at start time.
+            override = str(host.get('ip_override') or '').strip()
+            if override:
+                try:
+                    override_addr = ipaddress.IPv4Address(override)
+                except (ipaddress.AddressValueError, ValueError):
+                    raise ValueError(
+                        f"Host '{host['name']}' has an invalid ip_override '{override}'."
+                    )
+                try:
+                    network_cidr = ipaddress.IPv4Network(network['cidr'], strict=False)
+                except (ipaddress.AddressValueError, ValueError):
+                    raise ValueError(
+                        f"Network '{network['name']}' has an invalid cidr '{network['cidr']}'."
+                    )
+                if override_addr not in network_cidr:
+                    raise ValueError(
+                        f"Host '{host['name']}' ip_override '{override}' is not inside "
+                        f"network '{network['name']}' CIDR '{network['cidr']}'."
+                    )
+                host['ip_override'] = override
+            else:
+                host.pop('ip_override', None)
+            # Per-assignment agent config (parallel to host['agents']): a map of
+            # {agent_type: {system_prompt, goal}} supplied by the agent-manager.
+            # Sanitize to string values; drop anything malformed.
+            agent_config = host.get('agent_config')
+            if isinstance(agent_config, dict):
+                cleaned = {}
+                for a_type, entry in agent_config.items():
+                    if isinstance(entry, dict):
+                        cleaned[str(a_type)] = {
+                            'system_prompt': str(entry.get('system_prompt') or ''),
+                            'goal': str(entry.get('goal') or ''),
+                        }
+                if cleaned:
+                    host['agent_config'] = cleaned
+                else:
+                    host.pop('agent_config', None)
+            else:
+                host.pop('agent_config', None)
         legacy_router_id = network.get('router_id')
         router_ids = network.get('router_ids')
         if not isinstance(router_ids, list):
@@ -169,3 +216,100 @@ def save_topology(payload):
     if app.is_running(topology_id):
         app.sync_hackerlab_runtime(topology)
     return topology
+
+
+def read_preset_file(path):
+    with open(path, 'r', encoding='utf8') as file:
+        return json.load(file)
+
+
+def resolve_preset(preset_id):
+    """Find a preset by its wrapper preset_id or, failing that, its filename stem.
+
+    Returns the parsed preset dict, or None if no match exists. Matching on the
+    wrapper id keeps GET /api/presets and POST .../instantiate consistent even
+    when the file name (two_networks_tiny) differs from the id (two-networks-tiny).
+    """
+    if not app.PRESETS_DIR.exists():
+        return None
+    stem_match = None
+    for path in sorted(app.PRESETS_DIR.glob('*.json')):
+        try:
+            data = read_preset_file(path)
+        except (OSError, ValueError):
+            continue
+        if data.get('preset_id') == preset_id:
+            return data
+        if stem_match is None and path.stem == preset_id:
+            stem_match = data
+    return stem_match
+
+
+def list_presets():
+    """Return lightweight metadata for every preset in PRESETS_DIR.
+
+    Counts are read from each preset's wrapper (network_count/host_count) when
+    present, and only computed from the nested topology as a fallback.
+    """
+    presets = []
+    if not app.PRESETS_DIR.exists():
+        return presets
+    for path in sorted(app.PRESETS_DIR.glob('*.json')):
+        try:
+            data = read_preset_file(path)
+        except (OSError, ValueError):
+            continue
+        topology = data.get('topology') or {}
+        networks = topology.get('networks') or []
+        network_count = data.get('network_count')
+        if network_count is None:
+            network_count = len(networks)
+        host_count = data.get('host_count')
+        if host_count is None:
+            host_count = sum(len(network.get('hosts') or []) for network in networks)
+        presets.append({
+            'preset_id': data.get('preset_id') or path.stem,
+            'preset_name': data.get('preset_name') or path.stem,
+            'description': data.get('description') or '',
+            'tags': data.get('tags') or [],
+            'network_count': network_count,
+            'host_count': host_count,
+        })
+    return presets
+
+
+def instantiate_preset(preset_id, new_id=None, name=None):
+    """Materialize a preset into a new draft topology.
+
+    Returns (topology, status_code, error_message). On success error_message is
+    None; on failure topology is None.
+    """
+    data = resolve_preset(preset_id)
+    if data is None:
+        return None, 404, f"Preset '{preset_id}' not found."
+
+    topology = copy.deepcopy(data.get('topology') or {})
+    # Strip instance-specific fields back to draft defaults.
+    topology.pop('created_at', None)
+    topology.pop('updated_at', None)
+    topology['status'] = 'draft'
+
+    if name:
+        topology['name'] = name
+    elif not topology.get('name'):
+        topology['name'] = data.get('preset_name') or preset_id
+
+    if new_id:
+        normalized = app.normalize_identifier(new_id, '')
+        if not normalized:
+            return None, 400, f"Invalid new_id '{new_id}'."
+        if app.topology_path(normalized).exists():
+            return None, 409, f"Topology '{normalized}' already exists."
+        topology['id'] = normalized
+    else:
+        # Let save_topology() mint a fresh slug-based id so repeated
+        # instantiations never collide.
+        topology.pop('id', None)
+
+    saved = save_topology(topology)
+    return saved, 200, None
