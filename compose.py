@@ -53,12 +53,24 @@ def generate_compose(topology, opencode_images=None):
     if opencode_images is None:
         opencode_images = {}
 
+    # Determine whether any topology network requests internet access. If so, we
+    # create ONE dedicated egress bridge (non-internal, so Docker's built-in NAT
+    # gives it real internet) and attach it to the root router only. Individual
+    # topology bridges are ALWAYS internal now — internet reachability is purely a
+    # router-level concern, not a per-bridge one.
+    has_internet = any(bool(network.get('internet')) for network in topology['networks'])
+    egress_network_key = 'egress'
+    egress_network_name = f'{project_prefix}-egress'
+
     compose = {
         'services': {},
-        'networks': {
-            'scl-playground-net': {'external': True, 'name': 'scl-playground-net'}
-        }
+        'networks': {}
     }
+    if has_internet:
+        compose['networks'][egress_network_key] = {
+            'name': egress_network_name,
+            'internal': False,
+        }
 
     # SLIPS monitoring: a shared pcaps volume is declared only when enabled. The
     # capture_source router writes pcaps here; the slips-sensor reads them.
@@ -73,11 +85,18 @@ def generate_compose(topology, opencode_images=None):
     router_network_attaches = {router['id']: [] for router in routers}
     for index, network in enumerate(topology['networks'], start=1):
         network_key = f'topo_{network["id"]}'
-        # Only set internal=True if internet access is not requested for this network
-        network_internal = not bool(network.get('internet'))
+        # Topology bridges stay internal by default; an `internet: true` network's
+        # hosts reach the internet via the root router's egress interface (bridge
+        # itself stays internal — unchanged, pre-existing behavior). The one
+        # addition: a network carrying an agent-bearing host goes non-internal
+        # directly, so the agent (OpenCode's own LLM calls + any curl/wget it runs)
+        # has a real route out. Simpler than a scoped proxy; the tradeoff is that
+        # whole network gets real internet, not just the agent's own traffic —
+        # accepted deliberately.
+        network_has_agent = any(app.host_agents(host) for host in network.get('hosts', []))
         compose['networks'][network_key] = {
             'name': f'{project_prefix}-{network["id"]}',
-            'internal': network_internal,
+            'internal': not network_has_agent,
             'ipam': {'config': [{'subnet': network['cidr']}]},
         }
         router_ids = network.get('router_ids') or [network.get('default_router_id') or root_router_id]
@@ -117,7 +136,13 @@ def generate_compose(topology, opencode_images=None):
     for router in routers:
         router_id = router['id']
         service_name = f'router-{app.router_key(router_id)}'
-        router_networks = {'scl-playground-net': {}}
+        router_networks = {}
+        # Only the root router gets the egress (internet) interface, and only when
+        # the topology has at least one internet-enabled network. It is the sole
+        # non-internal network on that router, so its WAN auto-detection
+        # (`ip route show default`) resolves to the egress interface.
+        if has_internet and router_id == root_router_id:
+            router_networks[egress_network_key] = {}
         for network in router_network_attaches.get(router_id, []):
             network_key = f'topo_{network["id"]}'
             router_networks[network_key] = {'ipv4_address': network_router_ip_maps[network['id']].get(router_id, app.router_ip(network['cidr']))}
@@ -189,6 +214,8 @@ def generate_compose(topology, opencode_images=None):
                 host_image = app.RDP_HOST_IMAGE
             elif host.get('type') == 'vuln-web-server':
                 host_image = app.WEB_HOST_IMAGE
+            elif host.get('type') == 'smb-server':
+                host_image = app.SMB_HOST_IMAGE
             elif host_has_agents:
                 host_image = opencode_images.get(host_base_image, app.OPENCODE_IMAGE)
             else:
@@ -200,7 +227,7 @@ def generate_compose(topology, opencode_images=None):
                 'hostname': host['name'],
                 'cap_add': ['NET_ADMIN'],
                 'command': ['sh', '-lc', app.host_script(topology, network, host, host_index, gateway_ip)],
-                'networks': {network_key: {'ipv4_address': app.host_ip(network['cidr'], host_index)}},
+                'networks': {network_key: {'ipv4_address': app.host_ip(network['cidr'], host_index, host)}},
                 'labels': [
                     'scl.plugin=network-topology',
                     f'scl.topology={topology["id"]}',
@@ -210,9 +237,6 @@ def generate_compose(topology, opencode_images=None):
                     f'scl.has_agents={"true" if host_has_agents else "false"}',
                 ],
             }
-
-            # Attach all hosts to scl-playground-net for SCL service connectivity
-            service_config['networks']['scl-playground-net'] = {}
 
             if host.get('type') == 'ad-server':
                 # The Samba AD DC provisions on first boot (~15-60s) before `samba -i`
@@ -330,8 +354,10 @@ def generate_compose(topology, opencode_images=None):
 
                 # OpenCode HTTP API port — internal only (not published to the host).
                 # Publishing host port 4096 for every agent host made multiple agents
-                # collide on the same host port; the agent-manager reaches OpenCode
-                # over scl-playground-net by container name instead.
+                # collide on the same host port. The agent-manager never connects to
+                # this port over the network; it reaches OpenCode via `docker exec`
+                # (curl localhost:4096) on the container, so no shared network is
+                # needed. `expose` documents the port without publishing it.
                 service_config['expose'] = ['4096']
 
                 # Guardrail HTTP API — 127.0.0.1:4097 inside the container. It is
@@ -342,19 +368,27 @@ def generate_compose(topology, opencode_images=None):
 
             compose['services'][service_name] = service_config
 
-    # SLIPS sensor sidecar: joined to scl-playground-net so it can reach the
-    # agent-manager, mounting the shared pcaps volume. It runs SLIPS (patched)
-    # on the router's captures and forwards alerts to the defender API.
+    # SLIPS sensor sidecar: reads the shared pcaps volume and forwards alerts to
+    # the agent-manager defender webhook. It is deliberately kept OFF every
+    # topology-visible subnet (and off any shared SCL network) so it can never
+    # appear to a benchmarked agent as a network peer. To reach the agent-manager
+    # it uses the Docker host gateway (`host.docker.internal`, mapped to
+    # host-gateway via extra_hosts on Linux) and the agent-manager's published
+    # DASHBOARD_PORT — no shared Docker network required. The sensor has no
+    # `networks` key, so Docker attaches it only to the project's implicit default
+    # bridge, which carries no topology hosts.
     if slips_enabled and pcaps_volume:
+        dashboard_port = os.environ.get('DASHBOARD_PORT', '9005')
         defender_url = os.environ.get(
-            'DEFENDER_URL', 'http://scl-agent-manager-dashboard:8080/api/defender/alerts'
+            'DEFENDER_URL',
+            f'http://host.docker.internal:{dashboard_port}/api/defender/alerts',
         )
         compose['services']['slips-sensor'] = {
             'image': app.SLIPS_IMAGE,
             'container_name': f'{project_prefix}-slips-sensor',
             'cap_add': ['NET_ADMIN', 'NET_RAW'],
             'volumes': [f'{pcaps_volume}:/pcaps', f'{app.OUTPUTS_HOST_PATH}:/outputs'],
-            'networks': {'scl-playground-net': {}},
+            'extra_hosts': ['host.docker.internal:host-gateway'],
             'environment': {
                 'DEFENDER_URL': defender_url,
                 'RUN_ID': run_id,

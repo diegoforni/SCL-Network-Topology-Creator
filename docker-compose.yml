@@ -33,9 +33,9 @@ services:
       # topology container RUN_ID env + agent-manager session capture.
       - RUN_ID=${RUN_ID:-}
     networks:
-      - scl-playground-net
+      - playground-net
     restart: unless-stopped
 
 networks:
-  scl-playground-net:
+  playground-net:
     external: true
