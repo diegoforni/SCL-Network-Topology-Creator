@@ -33,9 +33,13 @@ services:
       # topology container RUN_ID env + agent-manager session capture.
       - RUN_ID=${RUN_ID:-}
     networks:
-      - playground-net
+      - scl-playground-net
     restart: unless-stopped
 
 networks:
-  playground-net:
+  scl-playground-net:
     external: true
+    # The platform's shared network name is environment-specific. Default to the
+    # repo convention (scl-playground-net); override via SCL_NETWORK_NAME in .env
+    # for deployments whose platform network is named differently (e.g. playground-net).
+    name: ${SCL_NETWORK_NAME:-scl-playground-net}
