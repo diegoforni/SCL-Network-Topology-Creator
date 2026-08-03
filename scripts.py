@@ -258,35 +258,21 @@ def host_script(topology, network, host, host_index, gateway):
     # SLIPS captures, and (for internet-enabled networks) the root router NATs
     # out via its egress interface. Hosts never get a second interface, so `ip a`
     # inside a host looks like a normal LAN client behind a home router.
-    if agents_list:
-        # This host's own network is non-internal directly (see compose.py — a
-        # network carrying an agent-bearing host is NOT internal, so Docker's own
-        # NAT gives it real internet through the bridge's own auto-assigned
-        # gateway). That gateway is what Docker ALREADY put in this container's
-        # default route at boot — do not override it, or internet-bound traffic
-        # loses its only real path out. What's still needed: explicit routes to
-        # sibling topology subnets via the router (this network's `gateway` param),
-        # since those are reachable only through the router's firewall, not via
-        # the bridge's own gateway.
-        sibling_cidrs = [n['cidr'] for n in topology.get('networks', []) if n.get('id') != network.get('id')]
-        sibling_routes = ''.join(
-            f'ip route replace {cidr} via {gateway} '
-            f'|| echo "WARN: failed to route {cidr} via {gateway}" >&2\n'
-            for cidr in sibling_cidrs
-        )
-        internet_config = sibling_routes.strip()
-    else:
-        internet_config = (
-            f'ip route replace default via {gateway} '
-            f'|| echo "WARN: failed to set default route via {gateway}" >&2'
-        )
-    # DNS: internet-enabled hosts point at a public resolver reachable through the
-    # router's NAT (Docker's embedded resolver at 127.0.0.11 forwards to a host
-    # loopback address that an internal bridge cannot reach, so name resolution
-    # would otherwise fail even though IP routing to the internet works).
-    # Isolated hosts keep Docker's embedded DNS so sibling container names still
-    # resolve. Agent-bearing hosts get the same public-resolver treatment as
-    # internet-enabled networks, since they now have real internet too.
+    # Single default route via the router for EVERY host (agent or not). The host
+    # is single-NIC on its internal bridge; the router is its only way off-subnet,
+    # for both sibling subnets and the internet. The router forwards + NATs
+    # internet-bound traffic out its egress interface, so an agent's LLM/recon/exfil
+    # all traverse the router (monitored, firewalled) with no out-of-band path.
+    internet_config = (
+        f'ip route replace default via {gateway} '
+        f'|| echo "WARN: failed to set default route via {gateway}" >&2'
+    )
+    # DNS: hosts that reach the internet (an internet-enabled network OR an agent
+    # host, both now routed out via the router) point at a public resolver — an
+    # internal bridge cannot use Docker's embedded resolver (127.0.0.11) for
+    # external names, and the query itself goes out through the router's NAT.
+    # Fully-isolated hosts keep the embedded resolver so sibling container names
+    # still resolve.
     if network.get('internet') or agents_list:
         internet_config += (
             '\necho "nameserver 8.8.8.8" > /etc/resolv.conf'
@@ -383,8 +369,13 @@ def router_script(topology, router, descendant_networks, child_routes, transit_s
     allowed_pairs = set(topology.get('router', {}).get('firewall', {}).get('allowed', []))
     forward_rules = []
     if is_root:
+        # Permit egress out the WAN (egress) interface for any subnet that needs the
+        # outside world: an internet-enabled network, OR a network carrying an agent
+        # (which must reach its LLM). This blanket allow is the single place egress
+        # is governed — tighten it to a destination allowlist (e.g. only the LLM
+        # API + package mirrors) here for controlled egress.
         for network in descendant_networks:
-            if network.get('internet'):
+            if network.get('internet') or any(app.host_agents(h) for h in network.get('hosts', [])):
                 forward_rules.append(f"ip saddr {network['cidr']} oifname \"$$wan_if\" accept")
         for subnet in transit_subnets:
             forward_rules.append(f"ip saddr {subnet} oifname \"$$wan_if\" accept")

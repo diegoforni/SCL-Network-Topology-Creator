@@ -53,12 +53,22 @@ def generate_compose(topology, opencode_images=None):
     if opencode_images is None:
         opencode_images = {}
 
-    # Determine whether any topology network requests internet access. If so, we
-    # create ONE dedicated egress bridge (non-internal, so Docker's built-in NAT
-    # gives it real internet) and attach it to the root router only. Individual
-    # topology bridges are ALWAYS internal now — internet reachability is purely a
-    # router-level concern, not a per-bridge one.
+    # Egress is ALWAYS router-mediated. Every topology bridge is internal (no
+    # direct Docker NAT); the ONLY path to the real internet is a single dedicated
+    # egress bridge (non-internal) attached ONLY to the root router, which NATs and
+    # firewalls everything out of it. This makes the router the sole egress
+    # chokepoint, so SLIPS sees and the forward policy governs ALL outbound traffic
+    # — including an agent's LLM calls, web recon, and any exfil attempt. The egress
+    # bridge is created whenever the topology needs the outside world: either a
+    # network requests internet, OR a host carries an agent (which must reach its
+    # LLM). Agents therefore get internet THROUGH the router, never around it.
     has_internet = any(bool(network.get('internet')) for network in topology['networks'])
+    has_agent_host = any(
+        app.host_agents(host)
+        for network in topology['networks']
+        for host in network.get('hosts', [])
+    )
+    needs_egress = has_internet or has_agent_host
     egress_network_key = 'egress'
     egress_network_name = f'{project_prefix}-egress'
 
@@ -66,7 +76,7 @@ def generate_compose(topology, opencode_images=None):
         'services': {},
         'networks': {}
     }
-    if has_internet:
+    if needs_egress:
         compose['networks'][egress_network_key] = {
             'name': egress_network_name,
             'internal': False,
@@ -85,18 +95,13 @@ def generate_compose(topology, opencode_images=None):
     router_network_attaches = {router['id']: [] for router in routers}
     for index, network in enumerate(topology['networks'], start=1):
         network_key = f'topo_{network["id"]}'
-        # Topology bridges stay internal by default; an `internet: true` network's
-        # hosts reach the internet via the root router's egress interface (bridge
-        # itself stays internal — unchanged, pre-existing behavior). The one
-        # addition: a network carrying an agent-bearing host goes non-internal
-        # directly, so the agent (OpenCode's own LLM calls + any curl/wget it runs)
-        # has a real route out. Simpler than a scoped proxy; the tradeoff is that
-        # whole network gets real internet, not just the agent's own traffic —
-        # accepted deliberately.
-        network_has_agent = any(app.host_agents(host) for host in network.get('hosts', []))
+        # Every topology bridge is internal, unconditionally. Hosts (agent or not)
+        # reach the outside world only via the root router's egress interface, never
+        # through their own bridge — so the router is the single, monitored egress
+        # chokepoint and no host has an out-of-band internet path.
         compose['networks'][network_key] = {
             'name': f'{project_prefix}-{network["id"]}',
-            'internal': not network_has_agent,
+            'internal': True,
             'ipam': {'config': [{'subnet': network['cidr']}]},
         }
         router_ids = network.get('router_ids') or [network.get('default_router_id') or root_router_id]
@@ -138,10 +143,11 @@ def generate_compose(topology, opencode_images=None):
         service_name = f'router-{app.router_key(router_id)}'
         router_networks = {}
         # Only the root router gets the egress (internet) interface, and only when
-        # the topology has at least one internet-enabled network. It is the sole
-        # non-internal network on that router, so its WAN auto-detection
-        # (`ip route show default`) resolves to the egress interface.
-        if has_internet and router_id == root_router_id:
+        # the topology needs the outside world (an internet-enabled network OR an
+        # agent host). It is the sole non-internal network on that router, so its
+        # WAN auto-detection (`ip route show default`) resolves to the egress
+        # interface, which is what the router NATs and firewalls all egress out of.
+        if needs_egress and router_id == root_router_id:
             router_networks[egress_network_key] = {}
         for network in router_network_attaches.get(router_id, []):
             network_key = f'topo_{network["id"]}'
