@@ -41,6 +41,9 @@ class TopologyHandler(BaseHTTPRequestHandler):
         if path == '/api/topologies':
             self.send_json(200, {'topologies': app.list_topologies()})
             return
+        if path == '/api/presets':
+            self.send_json(200, {'presets': app.list_presets()})
+            return
         match = re.fullmatch(r'/api/jobs/([^/]+)', path)
         if match:
             job = app.get_job(unquote(match.group(1)))
@@ -74,6 +77,18 @@ class TopologyHandler(BaseHTTPRequestHandler):
             })
             self.send_json(202, {'job_id': job_id})
             return
+        match = re.fullmatch(r'/api/presets/([^/]+)/instantiate', path)
+        if match:
+            preset_id = unquote(match.group(1))
+            body = self.read_body()
+            saved, status, error = app.instantiate_preset(
+                preset_id, body.get('new_id'), body.get('name')
+            )
+            if error:
+                self.send_json(status, {'error': error})
+                return
+            self.send_json(200, {'topology': saved})
+            return
         match = re.fullmatch(r'/api/topologies/([^/]+)/(start|stop)', path)
         if match:
             topology_id = unquote(match.group(1))
@@ -82,6 +97,13 @@ class TopologyHandler(BaseHTTPRequestHandler):
                 job_id = app.start_job(lambda: app.start_topology(topology_id))
             else:
                 job_id = app.start_job(lambda: app.stop_topology(topology_id))
+            self.send_json(202, {'job_id': job_id})
+            return
+        match = re.fullmatch(r'/api/topologies/([^/]+)/hosts/([^/]+)/recreate', path)
+        if match:
+            topology_id = unquote(match.group(1))
+            host_id = unquote(match.group(2))
+            job_id = app.start_job(lambda: app.recreate_host(topology_id, host_id))
             self.send_json(202, {'job_id': job_id})
             return
         self.send_json(404, {'error': 'Not found'})
