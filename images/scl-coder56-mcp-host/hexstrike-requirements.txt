@@ -1,0 +1,16 @@
+# Minimal, load-bearing deps to START the HexStrike backend (hexstrike_server.py)
+# and run its MCP bridge (hexstrike_mcp.py). Deliberately NOT the repo's full
+# requirements.txt: that pulls pwntools + angr + bcrypt (~3 GB + native builds)
+# which are NOT runtime imports of the server (only emitted into subprocess
+# scripts) and would bloat/break the image. These are the UNCONDITIONAL top-level
+# imports of hexstrike_server.py (flask/psutil/requests/aiohttp/bs4/selenium/
+# mitmproxy) plus the MCP SDK the bridge needs.
+flask>=2.3.0,<4.0.0
+psutil>=5.9.0,<6.0.0
+requests>=2.31.0,<3.0.0
+aiohttp>=3.8.0,<4.0.0
+beautifulsoup4>=4.12.0,<5.0.0
+selenium>=4.15.0,<5.0.0
+mitmproxy>=9.0.0,<11.0.0
+# MCP bridge: provides mcp.server.fastmcp.FastMCP (stdio). NOT on the opencode image.
+mcp>=1.0.0,<2.0.0

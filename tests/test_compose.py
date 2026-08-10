@@ -143,6 +143,17 @@ def test_generate_compose_rich_agent_host_has_run_id(rich_topology):
         assert cfg['environment']['RUN_ID'] == topo_id
 
 
+def test_generate_compose_can_disable_coder56_verifier(rich_topology):
+    host = rich_topology['networks'][1]['hosts'][0]
+    host['coder56_verifier_enabled'] = False
+
+    out = app.generate_compose(rich_topology)
+    service = out['services']['int-box']
+
+    assert service['environment']['CODER56_VERIFIER_ENABLED'] == '0'
+    assert 'DIRECT VALIDATION MODE (coder56 verifier disabled)' in service['command'][2]
+
+
 # ---------------------------------------------------------------------------
 # resolve_run_id
 # ---------------------------------------------------------------------------

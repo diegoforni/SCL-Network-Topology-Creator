@@ -90,6 +90,14 @@ def validate_topology(topology):
                     host.pop('agent_config', None)
             else:
                 host.pop('agent_config', None)
+            # A coder56-mcp host exists to run coder56 + HexStrike MCP, so the type
+            # IMPLIES the coder56 agent. Auto-seed it so a host saved without an
+            # explicit agents list can never start the MCP backend UNGUARDED —
+            # host_has_agents, the guardrail env, HEXSTRIKE_ENABLED, and the mcp
+            # block all key off the agents list, so without coder56 the host would
+            # be a silently half-wired MCP image (no opencode serve, no guard).
+            if host['type'] == 'coder56-mcp' and 'coder56' not in host['agents']:
+                host['agents'] = ['coder56'] + [a for a in host['agents'] if a != 'coder56']
         legacy_router_id = network.get('router_id')
         router_ids = network.get('router_ids')
         if not isinstance(router_ids, list):

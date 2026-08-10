@@ -209,9 +209,9 @@ def generate_compose(topology, opencode_images=None):
             host_has_agents = bool(app.host_agents(host))
             host_base_image = host.get('image', 'ubuntu:24.04')
 
-            # Dynamic image selection: repo-server / ad-server hosts use their
-            # dedicated image (full-stack app / Samba AD DC); agent hosts use their
-            # OpenCode variant; everything else uses the plain base image.
+            # Dynamic image selection: repo-server / ad-server / coder56-mcp hosts
+            # use their dedicated image; agent hosts use their OpenCode variant;
+            # everything else uses the plain base image.
             if host.get('type') == 'repo-server':
                 host_image = app.REPO_HOST_IMAGE
             elif host.get('type') == 'ad-server':
@@ -222,6 +222,8 @@ def generate_compose(topology, opencode_images=None):
                 host_image = app.WEB_HOST_IMAGE
             elif host.get('type') == 'smb-server':
                 host_image = app.SMB_HOST_IMAGE
+            elif host.get('type') == 'coder56-mcp':
+                host_image = app.CODER56_MCP_HOST_IMAGE
             elif host_has_agents:
                 host_image = opencode_images.get(host_base_image, app.OPENCODE_IMAGE)
             else:
@@ -327,6 +329,13 @@ def generate_compose(topology, opencode_images=None):
                     # Default to the topology id; override globally via RUN_ID in .env.
                     'RUN_ID': run_id,
                 }
+                if (
+                    'coder56' in app.host_agents(host)
+                    and host.get('coder56_verifier_enabled') is False
+                ):
+                    # Enabled is the image/default behavior. Emit only the opt-out
+                    # so old topology compose output remains byte-compatible.
+                    service_config['environment']['CODER56_VERIFIER_ENABLED'] = '0'
 
                 # Guardrail (auditor) configuration for guarded hosts only.
                 # The executor opencode (PID 1, entrypoint) reads these from the
@@ -357,6 +366,26 @@ def generate_compose(topology, opencode_images=None):
                             '1' if host.get('guardrail_verify_markers') is True else '0'
                         ),
                     })
+
+                # coder56-mcp: tell the inherited entrypoint to start the HexStrike
+                # AI backend on 127.0.0.1:8888 before the executor serve, so the
+                # FastMCP bridge (spawned lazily by opencode on the first MCP tool
+                # call) can reach it. The MCP "mcp" block itself is injected into
+                # opencode.json by scripts.py opencode_agent_block.
+                if host.get('type') == 'coder56-mcp':
+                    service_config['environment']['HEXSTRIKE_ENABLED'] = '1'
+                    # The backend provisions on first boot (~2-5s for the Flask
+                    # import stack) before it serves :8888. Without a healthcheck a
+                    # coder56 launch issued right after topology start races the
+                    # first MCP call against a not-yet-ready backend. Probe /health
+                    # as the readiness signal (curl is baked in the opencode image).
+                    service_config['healthcheck'] = {
+                        'test': ['CMD', 'bash', '-lc', 'curl -sf --connect-timeout 2 --max-time 3 http://127.0.0.1:8888/health >/dev/null 2>&1'],
+                        'interval': '10s',
+                        'timeout': '5s',
+                        'retries': 18,
+                        'start_period': '60s',
+                    }
 
                 # OpenCode HTTP API port — internal only (not published to the host).
                 # Publishing host port 4096 for every agent host made multiple agents
