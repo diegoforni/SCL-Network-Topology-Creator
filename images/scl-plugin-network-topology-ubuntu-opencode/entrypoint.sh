@@ -145,6 +145,55 @@ if [ $# -gt 0 ]; then
     fi
 fi
 
+# The topology-generated opencode.json already selects the normal or legacy
+# coder56 prompt. Native phased runs use the baked markdown agents, so enforce
+# the same host-level switch there before OpenCode starts.
+if [[ "${CODER56_VERIFIER_ENABLED:-1}" == "0" ]]; then
+    echo "CODER56_VERIFIER_ENABLED=0: enabling legacy single-agent validation mode"
+    agents_dir=/root/.config/opencode/agents
+    rm -f "${agents_dir}/coder56_verifier.md"
+
+    python3 - "${agents_dir}" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+agents = Path(sys.argv[1])
+phase = agents / "coder56_phase.md"
+if phase.exists():
+    text = phase.read_text(encoding="utf-8")
+    text = re.sub(r"(?m)^\s+coder56_verifier: allow\n", "", text)
+    replacement = """DIRECT VALIDATION MODE (coder56 verifier disabled):
+- Do not invoke coder56_verifier or any other subagent.
+- Validate each candidate directly with a minimal reproduction and clean control.
+- Report the observed evidence without claiming independent verifier confirmation.
+- This legacy single-agent rule replaces the VERIFICATION GATE below.
+
+"""
+    text = re.sub(
+        r"VERIFICATION GATE \(mandatory.*?(?=ENGAGEMENT-MEMORY TRUST & EVIDENCE DISCIPLINE:)",
+        replacement,
+        text,
+        flags=re.DOTALL,
+    )
+    phase.write_text(text, encoding="utf-8")
+
+lead = agents / "coder56_lead.md"
+if lead.exists():
+    text = lead.read_text(encoding="utf-8")
+    text = re.sub(
+        r"- VERIFIER ROLE SEPARATION IS NON-NEGOTIABLE\..*?(?=- Be concise between phases;)",
+        "- VERIFIER DISABLED: accept the phase worker's direct validation evidence; "
+        "do not require verifier markers, verdict tokens, or verifier audit files.\n",
+        text,
+        flags=re.DOTALL,
+    )
+    lead.write_text(text, encoding="utf-8")
+PY
+else
+    echo "CODER56_VERIFIER_ENABLED=${CODER56_VERIFIER_ENABLED:-1}: verifier mode enabled"
+fi
+
 # --- GUARDRAIL runtime (Option B: second opencode serve on 127.0.0.1:4097) ---
 # IMPORTANT: the guardrail runtime MUST be brought up BEFORE the executor opencode
 # serve (4096) starts. opencode loads ~/.config/opencode/plugins/*.ts only at
@@ -231,6 +280,37 @@ else
     echo "GUARDRAIL_ENABLED!=1 (='${GUARDRAIL_ENABLED:-<unset>}'); guardrail runtime skipped."
 fi
 
+# --- HexStrike AI backend (127.0.0.1:8888) — coder56-mcp hosts only ------------
+# The HexStrike FastMCP bridge (spawned lazily by opencode on the first MCP tool
+# call) proxies coder56's MCP calls to this Flask backend. It MUST be up before
+# the 4096 executor serve handles the first MCP call, so we start it here (after
+# the guardrail runtime, before the executor). Gated on HEXSTRIKE_ENABLED=1 (set
+# by compose.py only for coder56-mcp hosts) so every other host sharing this
+# image is unaffected. The image patches the backend to bind 127.0.0.1 (not
+# 0.0.0.0), keeping the unrestricted /api/command runner loopback-only.
+HEXSTRIKE_PID=""
+if [[ "${HEXSTRIKE_ENABLED:-0}" == "1" ]]; then
+    if [[ -f /opt/hexstrike-ai/hexstrike_server.py ]]; then
+        hexstrike_log="/var/log/hexstrike-server.log"
+        touch "${hexstrike_log}"
+        echo "Starting HexStrike AI backend on 127.0.0.1:8888..."
+        (cd /opt/hexstrike-ai && HEXSTRIKE_PORT=8888 python3 hexstrike_server.py) >>"${hexstrike_log}" 2>&1 &
+        HEXSTRIKE_PID=$!
+        for i in $(seq 1 90); do
+            if curl -sf --connect-timeout 2 --max-time 3 http://127.0.0.1:8888/health >/dev/null 2>&1; then
+                echo "✅ HexStrike backend ready (127.0.0.1:8888) after ${i}*0.5s"
+                break
+            fi
+            sleep 0.5
+        done
+        if ! curl -sf --connect-timeout 2 --max-time 3 http://127.0.0.1:8888/health >/dev/null 2>&1; then
+            echo "⚠️  HexStrike backend did NOT become ready on 127.0.0.1:8888 within 45s (see ${hexstrike_log}). MCP tool calls will fail until it is up."
+        fi
+    else
+        echo "⚠️  HEXSTRIKE_ENABLED=1 but /opt/hexstrike-ai/hexstrike_server.py is missing; HexStrike backend skipped."
+    fi
+fi
+
 # Start OpenCode HTTP server for remote API access (used by auto_responder).
 # This runs AFTER the guardrail runtime above so the executor process picks up the
 # global guardrail plugin (guardrail.ts) from ~/.config/opencode/plugins at startup.
@@ -249,6 +329,9 @@ cleanup() {
     fi
     if [[ -n "${GUARDRAIL_PID}" ]] && kill -0 "${GUARDRAIL_PID}" >/dev/null 2>&1; then
         kill "${GUARDRAIL_PID}" >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${HEXSTRIKE_PID}" ]] && kill -0 "${HEXSTRIKE_PID}" >/dev/null 2>&1; then
+        kill "${HEXSTRIKE_PID}" >/dev/null 2>&1 || true
     fi
     if [[ -n "${OPENCODE_PID}" ]] && kill -0 "${OPENCODE_PID}" >/dev/null 2>&1; then
         kill "${OPENCODE_PID}" >/dev/null 2>&1 || true

@@ -495,3 +495,44 @@ def ensure_web_image(topology, force_rebuild=False):
     if build.returncode != 0:
         raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.WEB_HOST_IMAGE}')
     print(f"✅ Built Web-host image: {app.WEB_HOST_IMAGE}")
+
+
+def ensure_coder56_mcp_image(topology, force_rebuild=False):
+    """Build the coder56-mcp-host image if any host is a `coder56-mcp`.
+
+    Unlike every other host image (which is FROM the BASE_IMAGE), this one is a
+    CHILD of the opencode image (FROM scl-plugin-network-topology-ubuntu-opencode:0.1):
+    it inherits coder56 markdown agents + the guardrail plugin + entrypoint.sh and
+    ADDS the HexStrike AI MCP backend (loopback :8888) + its FastMCP stdio bridge.
+    The opencode image must already exist (built by ensure_opencode_images, called
+    earlier in start_topology) since `docker build` resolves the FROM tag at build
+    time. See images/scl-coder56-mcp-host/.
+    """
+    has_coder56_mcp_host = any(
+        host.get('type') == 'coder56-mcp'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_coder56_mcp_host:
+        return
+
+    if not force_rebuild:
+        result = subprocess.run(
+            ['docker', 'image', 'inspect', app.CODER56_MCP_HOST_IMAGE],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"✅ Coder56-MCP-host image exists: {app.CODER56_MCP_HOST_IMAGE}")
+            return
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-coder56-mcp-host'
+    if not context.exists():
+        raise RuntimeError(f'Coder56-MCP-host image build context not found: {context}')
+    print(f"🔨 Building Coder56-MCP-host image: {app.CODER56_MCP_HOST_IMAGE} from {context}")
+    build = subprocess.run(
+        ['docker', 'build', '-t', app.CODER56_MCP_HOST_IMAGE, str(context)],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.CODER56_MCP_HOST_IMAGE}')
+    print(f"✅ Built Coder56-MCP-host image: {app.CODER56_MCP_HOST_IMAGE}")

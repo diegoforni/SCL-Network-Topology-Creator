@@ -123,6 +123,14 @@ WEB_HOST_IMAGE = 'scl-web-host:0.1'
 # non-internet topology subnet doesn't have at container-runtime).
 SMB_HOST_IMAGE = 'scl-smb-server:0.1'
 
+# Dedicated image for `coder56-mcp` hosts — a CHILD of the opencode image (FROM
+# scl-plugin-network-topology-ubuntu-opencode:0.1) that inherits coder56 + the
+# guardrail and ADDS the HexStrike AI MCP backend (:8888, loopback) + its FastMCP
+# stdio bridge. coder56 reaches the 150+ hexstrike tools over MCP; every MCP call
+# is gated by the guardrail judge when the guard is armed. See
+# images/scl-coder56-mcp-host/.
+CODER56_MCP_HOST_IMAGE = 'scl-coder56-mcp-host:0.1'
+
 # Map of base OS images to their OpenCode-enabled variants
 # Built dynamically by ensure_opencode_images()
 OPENCODE_IMAGES_CACHE = {}
@@ -130,6 +138,7 @@ LLM_URL = os.environ.get('DASHBOARD_LLM_URL', 'http://dashboard/api/llm/chat')
 OPENCODE_API_KEY = os.environ.get('OPENCODE_API_KEY', '')
 LLM_URL_FULL = os.environ.get('LLM_URL', 'https://llm.ai.e-infra.cz/v1')
 LLM_MODEL = os.environ.get('LLM_MODEL', 'glm-5.2')
+LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'e-infra-chat')
 AGENTS_HOST_PATH = os.environ.get('AGENTS_HOST_PATH', '/agent-scripts')
 # Host path bind-mounted (rw) into opencode + SLIPS topology containers so their
 # run logs persist on the host and are visible to the agent-manager's Replay.
@@ -204,6 +213,11 @@ HOST_TYPES = {
         'label': 'Exfil listener',
         'ports': [],
         'description': 'Attacker-controlled listener that receives and stores exfiltrated data — no auth, no vulnerability, it is already attacker-owned.',
+    },
+    'coder56-mcp': {
+        'label': 'Coder56_MCP',
+        'ports': ['4096/tcp', '8888/tcp'],
+        'description': 'coder56 agent (opencode) wired to the HexStrike AI MCP server. The host runs the HexStrike Flask backend (150+ security-tool routes) on 127.0.0.1:8888 and exposes it to coder56 through a FastMCP stdio bridge, so coder56 can call any hexstrike tool over MCP. The host auto-arms the guardrail (coder56 is guarded); every MCP tool call is adjudicated by the guardrail judge and refused calls never reach the backend.',
     },
 }
 

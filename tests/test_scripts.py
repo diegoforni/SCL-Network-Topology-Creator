@@ -56,6 +56,18 @@ def test_opencode_agent_block_populated_for_agent_host(rich_topology):
     assert '"bash"' in block
 
 
+def test_opencode_agent_block_can_disable_coder56_verifier(rich_topology):
+    host = rich_topology['networks'][1]['hosts'][0]
+    host['coder56_verifier_enabled'] = False
+
+    block = app.opencode_agent_block(host, rich_topology)
+
+    assert 'DIRECT VALIDATION MODE (coder56 verifier disabled)' in block
+    assert 'VERIFICATION GATE (mandatory for each NEW vulnerability' not in block
+    assert '"task": {' in block
+    assert '"*": "deny"' in block
+
+
 # ---------------------------------------------------------------------------
 # host_script — golden-master the minimal host's full init script.
 # ---------------------------------------------------------------------------
