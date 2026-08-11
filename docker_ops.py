@@ -33,6 +33,7 @@ def start_topology(topology_id, force_rebuild=False):
     app.ensure_web_image(topology, force_rebuild=force_rebuild)
     app.ensure_smb_image(topology, force_rebuild=force_rebuild)
     app.ensure_coder56_mcp_image(topology, force_rebuild=force_rebuild)
+    app.ensure_erpnext_image(topology, force_rebuild=force_rebuild)
 
     compose = app.generate_compose(topology, opencode_images)
     with open(app.compose_path(topology_id), 'w', encoding='utf8') as file:

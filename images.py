@@ -536,3 +536,70 @@ def ensure_coder56_mcp_image(topology, force_rebuild=False):
     if build.returncode != 0:
         raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.CODER56_MCP_HOST_IMAGE}')
     print(f"✅ Built Coder56-MCP-host image: {app.CODER56_MCP_HOST_IMAGE}")
+
+
+def ensure_erpnext_image(topology, force_rebuild=False):
+    """Build the ERPNext-host image if any host is an `erpnext-server`.
+
+    Mirrors ensure_openhospital_image's build-from-context + OCI-label staleness
+    pattern. The image runs `bench init` + `bench get-app erpnext` at build time
+    (cloning the Frappe framework + ERPNext apps), so it needs no runtime egress.
+    The cloned repo/branch come from FRAPPE_URL/REF + ERPNEXT_URL/REF. Existing
+    tags are reused only when their OCI source+revision labels match all four
+    values (frappe URL+REF and erpnext URL+REF), so a stale image that predates a
+    ref bump is rebuilt.
+    """
+    has_erp_host = any(
+        host.get('type') == 'erpnext-server'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_erp_host:
+        return
+
+    expected = (
+        f'{app.FRAPPE_URL} {app.ERPNEXT_URL} '
+        f'frappe={app.FRAPPE_REF} erpnext={app.ERPNEXT_REF}'
+    )
+    if not force_rebuild:
+        result = subprocess.run(
+            [
+                'docker', 'image', 'inspect',
+                '--format',
+                '{{index .Config.Labels "org.opencontainers.image.source"}} '
+                '{{index .Config.Labels "org.opencontainers.image.revision"}}',
+                app.ERPNEXT_HOST_IMAGE,
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip() == expected:
+            print(f"✅ ERPNext-host image exists: {app.ERPNEXT_HOST_IMAGE}")
+            return
+        if result.returncode == 0:
+            print(
+                f"♻️ Rebuilding stale ERPNext-host image: "
+                f"found labels {result.stdout.strip()!r}, expected {expected!r}"
+            )
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-erpnext-host'
+    if not context.exists():
+        raise RuntimeError(f'ERPNext-host image build context not found: {context}')
+    print(
+        f"🔨 Building ERPNext-host image: {app.ERPNEXT_HOST_IMAGE} from {context} "
+        f"(frappe: {app.FRAPPE_URL}@{app.FRAPPE_REF}, erpnext: {app.ERPNEXT_URL}@{app.ERPNEXT_REF})"
+    )
+    build = subprocess.run(
+        [
+            'docker', 'build',
+            '--build-arg', f'FRAPPE_URL={app.FRAPPE_URL}',
+            '--build-arg', f'FRAPPE_REF={app.FRAPPE_REF}',
+            '--build-arg', f'ERPNEXT_URL={app.ERPNEXT_URL}',
+            '--build-arg', f'ERPNEXT_REF={app.ERPNEXT_REF}',
+            '-t', app.ERPNEXT_HOST_IMAGE,
+            str(context),
+        ],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.ERPNEXT_HOST_IMAGE}')
+    print(f"✅ Built ERPNext-host image: {app.ERPNEXT_HOST_IMAGE}")

@@ -420,6 +420,12 @@ def role_service_block(host_type):
         # boot, then runs `lighttpd -D` in the foreground so a failed web host fails the
         # container (mirrors ad-server/windows-client). Foreground completion block.
         return "exec /usr/local/bin/web-app-start.sh"
+    if host_type == 'erpnext-server':
+        # ERPNext supervisor: brings up MariaDB + Redis, creates the Frappe site +
+        # installs ERPNext + seeds demo users/data on first boot, then runs gunicorn
+        # + workers + nginx in the foreground so a failed stack fails the container
+        # (mirrors greedy/openhospital). Foreground completion block.
+        return "exec /usr/local/bin/erpnext-app-start.sh"
     if host_type == 'file-server':
         return "python3 -m http.server 8080 -d /srv/files &"
     if host_type == 'db':
