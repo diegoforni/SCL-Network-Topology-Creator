@@ -224,6 +224,8 @@ def generate_compose(topology, opencode_images=None):
                 host_image = app.SMB_HOST_IMAGE
             elif host.get('type') == 'coder56-mcp':
                 host_image = app.CODER56_MCP_HOST_IMAGE
+            elif host.get('type') == 'erpnext-server':
+                host_image = app.ERPNEXT_HOST_IMAGE
             elif host_has_agents:
                 host_image = opencode_images.get(host_base_image, app.OPENCODE_IMAGE)
             else:
@@ -283,6 +285,38 @@ def generate_compose(topology, opencode_images=None):
                     'timeout': '5s',
                     'retries': 18,
                     'start_period': '90s',
+                }
+
+            if host.get('type') == 'erpnext-server':
+                # Persistence: TWO named volumes so the ERPNext site + its data
+                # survive topology stop/start (compose down without -v preserves
+                # named volumes). The MariaDB datadir holds the schema + business
+                # data; the bench sites/ dir holds the Frappe site config
+                # (db_name/db_password) + uploaded files, so the two stay in sync
+                # across recreates. The supervisor (erpnext-app-start.sh) creates
+                # the site only when the sites volume is fresh, so a persistent
+                # volume is not re-provisioned on restart. start_period gives the
+                # first-boot site setup (~3-5 min: new-site + install-app + seed)
+                # room before the healthcheck is evaluated.
+                service_config['restart'] = 'unless-stopped'
+                mysql_vol = f'erp-mysql-{service_name}'
+                sites_vol = f'erp-sites-{service_name}'
+                compose.setdefault('volumes', {})[mysql_vol] = {
+                    'name': f'{project_prefix}-{service_name}-mysql-data',
+                }
+                compose.setdefault('volumes', {})[sites_vol] = {
+                    'name': f'{project_prefix}-{service_name}-sites',
+                }
+                service_config['volumes'] = [
+                    f'{mysql_vol}:/var/lib/mysql',
+                    f'{sites_vol}:/home/frappe/frappe-bench/sites',
+                ]
+                service_config['healthcheck'] = {
+                    'test': ['CMD', '/usr/local/bin/erpnext-healthcheck.sh'],
+                    'interval': '15s',
+                    'timeout': '10s',
+                    'retries': 24,
+                    'start_period': '360s',
                 }
 
             # Conditional OpenCode configuration (ports, volumes, environment, healthcheck) only when agents present

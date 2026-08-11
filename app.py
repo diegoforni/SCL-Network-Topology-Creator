@@ -131,6 +131,29 @@ SMB_HOST_IMAGE = 'scl-smb-server:0.1'
 # images/scl-coder56-mcp-host/.
 CODER56_MCP_HOST_IMAGE = 'scl-coder56-mcp-host:0.1'
 
+# Dedicated image for `erpnext-server` hosts — runs the ERPNext business app on
+# the Frappe/bench stack: MariaDB (:3306, site schema + seeded demo data) +
+# Redis (:6379) + the Frappe gunicorn web server (:8000, ERPNext desk + REST at
+# /api/method/...) + nginx front door (:80). The Frappe framework + ERPNext apps
+# are cloned + built at image-build time (`bench init` + `bench get-app
+# erpnext`); the site (new-site + install-app + seeded users/data) is created at
+# first boot. The MariaDB datadir AND the bench sites/ dir are on named volumes
+# so the site + data persist across topology restarts. Override the cloned
+# repo/branch with the FRAPPE_*/ERPNEXT_* env vars.
+ERPNEXT_HOST_IMAGE = 'scl-erpnext-host:0.1'
+FRAPPE_URL = os.environ.get(
+    'FRAPPE_URL', 'https://github.com/frappe/frappe'
+)
+FRAPPE_REF = os.environ.get(
+    'FRAPPE_REF', 'version-15'
+)
+ERPNEXT_URL = os.environ.get(
+    'ERPNEXT_URL', 'https://github.com/frappe/erpnext'
+)
+ERPNEXT_REF = os.environ.get(
+    'ERPNEXT_REF', 'version-15'
+)
+
 # Map of base OS images to their OpenCode-enabled variants
 # Built dynamically by ensure_opencode_images()
 OPENCODE_IMAGES_CACHE = {}
@@ -218,6 +241,11 @@ HOST_TYPES = {
         'label': 'Coder56_MCP',
         'ports': ['4096/tcp', '8888/tcp'],
         'description': 'coder56 agent (opencode) wired to the HexStrike AI MCP server. The host runs the HexStrike Flask backend (150+ security-tool routes) on 127.0.0.1:8888 and exposes it to coder56 through a FastMCP stdio bridge, so coder56 can call any hexstrike tool over MCP. The host auto-arms the guardrail (coder56 is guarded); every MCP tool call is adjudicated by the guardrail judge and refused calls never reach the backend.',
+    },
+    'erpnext-server': {
+        'label': 'ERPNext (Frappe business app)',
+        'ports': ['80/tcp', '8000/tcp', '3306/tcp', '6379/tcp'],
+        'description': 'ERPNext business app on the Frappe/bench stack: MariaDB (:3306, site schema + seeded demo data) + Redis (:6379) + the Frappe gunicorn web server (:8000, ERPNext desk + REST at /api/method/...) + nginx front door (:80). Built from the Frappe framework + ERPNext apps at image-build time; the MariaDB datadir AND the bench sites/ dir are on named volumes so the site + data persist across topology restarts. Reachable same-origin on :80 (login at /login, REST at /api/method/ping). Seeded with known weak-credential users at each privilege level.',
     },
 }
 
