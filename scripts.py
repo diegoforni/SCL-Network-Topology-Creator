@@ -295,7 +295,7 @@ def host_script(topology, network, host, host_index, gateway):
     data_content = host.get('data_content') or default_data_for_host(topology, network, host)
     service_block = role_service_block(host['type'])
     foreground_service_block = ''
-    if host['type'] in ('ad-server', 'windows-client', 'vuln-web-server'):
+    if host['type'] in ('ad-server', 'windows-client', 'vuln-web-server', 'db-server'):
         # The supervisor must become the container's foreground process so a failed
         # stack/DC fails the container instead of being hidden behind `tail -f /dev/null`.
         foreground_service_block = service_block
@@ -426,6 +426,13 @@ def role_service_block(host_type):
         # + workers + nginx in the foreground so a failed stack fails the container
         # (mirrors greedy/openhospital). Foreground completion block.
         return "exec /usr/local/bin/erpnext-app-start.sh"
+    if host_type == 'db-server':
+        # DB host supervisor: provisions the weak-cred SSH account + win flag on first
+        # boot, then runs `postgres` in the foreground (as the postgres user) so a failed
+        # DB fails the container (mirrors ad-server/vuln-web-server). The Postgres server,
+        # weak superuser password and seeded `corp` DB are baked into the image at build
+        # time. Foreground completion block. See images/scl-db-host/.
+        return "exec /usr/local/bin/db-app-start.sh"
     if host_type == 'file-server':
         return "python3 -m http.server 8080 -d /srv/files &"
     if host_type == 'db':

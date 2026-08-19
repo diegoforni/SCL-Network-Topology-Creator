@@ -226,6 +226,8 @@ def generate_compose(topology, opencode_images=None):
                 host_image = app.CODER56_MCP_HOST_IMAGE
             elif host.get('type') == 'erpnext-server':
                 host_image = app.ERPNEXT_HOST_IMAGE
+            elif host.get('type') == 'db-server':
+                host_image = app.DB_HOST_IMAGE
             elif host_has_agents:
                 host_image = opencode_images.get(host_base_image, app.OPENCODE_IMAGE)
             else:
