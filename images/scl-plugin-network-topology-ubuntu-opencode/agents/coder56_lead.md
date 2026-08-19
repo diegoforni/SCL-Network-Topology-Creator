@@ -54,4 +54,32 @@ RULES:
   `coder56_verifier` task; if it still self-verifies, record the finding as
   `unverified — verifier gate skipped` and continue. If the verifier task cannot
   launch, the phase must report `VERIFIER UNAVAILABLE`.
+- MULTI-PRINCIPAL COVERAGE (unconditional). You MUST pass the COMPLETE set of
+  provisioned principals/roles to EVERY `coder56_phase` subagent you spawn —
+  every owned account in EVERY distinct role group, not a subset. In each phase
+  prompt instruct that phase to exercise ALL provisioned roles against the
+  surface (especially the privileged WRITE surface — POST/PUT/PATCH/DELETE) so
+  no provisioned principal is left unexercised. Before you write the engagement
+  summary, confirm that every provisioned principal/group was actually pointed
+  at the surface by the phases; any group that was provisioned but never
+  exercised is a coverage gap you must surface (not silently drop). Two
+  principals from the SAME role group do NOT satisfy the cross-group
+  differential — span DISTINCT groups.
+- ISOLATED-SHELL PERSISTENCE PROPAGATION. Propagate to every `coder56_phase`
+  subagent the instruction that each bash command runs in an ISOLATED shell:
+  environment variables (TOKEN=...) set in one command do NOT survive to the
+  next, so auth tokens and cross-command state MUST be persisted to FILES under
+  `/tmp/$RUN_ID/` (one token file per role, written once and read back per call,
+  refreshed only on 401/403) — never re-logged-in per request and never carried
+  in env vars across commands.
+- PHASE R GROUND-TRUTH (applies whenever the plan opens with a research-first
+  Phase R). Phase R's persisted lines — `TARGET_IDENTITY|`, `OPENAPI_SPEC|`,
+  `TECH_STACK|`, and one `PRINCIPAL|...|token_loc=<FILE path>` per role group
+  (in `/outputs/$RUN_ID/memory/MEMORY.md`) — are GROUND TRUTH, not hypotheses.
+  Pass them in EVERY later phase's `PRIOR PHASE FINDINGS` block so each phase
+  derives KNOWN/GAPS/DELTA rather than re-enumerating the spec, re-probing roles,
+  or re-fingerprinting the stack. Treat a Phase R that writes NO `PRINCIPAL|`
+  and/or NO `OPENAPI_SPEC|` as a FAILED PRECONDITION: do NOT proceed to
+  write-testing against an unresolved role matrix / unknown surface — halt the
+  write phases and surface the precondition failure to the operator instead.
 - Be concise between phases; the load-bearing content is the subagents' findings, not your narration.
