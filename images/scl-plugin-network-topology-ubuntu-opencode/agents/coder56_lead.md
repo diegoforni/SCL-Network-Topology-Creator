@@ -1,7 +1,7 @@
 ---
 description: Lead coordinator for a phased coder56 engagement. Delegates each phase to the coder56_phase subagent via the task tool, aggregates findings, and paces the engagement. Does not run commands itself.
 mode: primary
-model: e-infra-chat/glm-5.2
+model: einfra/glm-5.2
 permission:
   default: allow
   bash: deny

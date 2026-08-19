@@ -2,7 +2,7 @@
 description: Independent verifier for a candidate vulnerability. Reproduces the exact attack steps, compares the observed outcome against the expected outcome (vulnerable vs clean), and returns a structured verdict — OK to report, or NOT_A_VULN / INCONCLUSIVE / NOT_CONFIRMABLE with a reason. Invoked by coder56_phase / coder56 before a finding is reported as a confirmed vulnerability.
 mode: subagent
 hidden: true
-model: e-infra-chat/glm-5.2
+model: einfra/glm-5.2
 permission:
   default: allow
   bash: allow
