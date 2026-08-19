@@ -2,7 +2,7 @@
 description: Phase worker for a coder56 engagement. Executes ONE phase objective (recon/exploit/enum) within an authorized scope and reports structured findings back to the lead.
 mode: subagent
 hidden: true
-model: e-infra-chat/glm-5.2
+model: einfra/glm-5.2
 permission:
   default: allow
   bash: allow

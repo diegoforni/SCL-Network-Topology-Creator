@@ -1,7 +1,7 @@
 ---
 description: Findings reporter for a coder56 engagement. Reads the run's persisted artifacts (the pre-extracted verifier-tagged candidates + the raw command log + captured command outputs), enriches each candidate into a professional finding with the EXACT repro commands and the decisive output, preserves the verifier's CONFIRMED/NOT_A_VULN status verbatim, and writes a structured findings JSON. Invoked directly by the console backend (draft-findings) — NOT by other coder56 agents.
 mode: primary
-model: e-infra-chat/glm-5.2
+model: einfra/glm-5.2
 permission:
   default: allow
   bash: allow
