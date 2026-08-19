@@ -1,0 +1,81 @@
+{
+  "created_at": "2026-07-28T19:48:50Z",
+  "id": "ad-kerberoast-lab-aeb9ee",
+  "infrastructure": {
+    "hackerlab_network_id": "net1"
+  },
+  "monitoring": {
+    "slips": {
+      "capture_source": "router1",
+      "defender_enabled": true,
+      "enabled": false
+    }
+  },
+  "name": "AD Kerberoast Lab",
+  "networks": [
+    {
+      "cidr": "10.77.50.0/24",
+      "default_router_id": "router1",
+      "hosts": [
+        {
+          "agent_enabled": false,
+          "agent_type": "",
+          "agents": [],
+          "data_content": "",
+          "data_prompt": "",
+          "generate_data": false,
+          "guardrail_enabled": null,
+          "id": "h1_1",
+          "image": "ubuntu:24.04",
+          "name": "dc01",
+          "password": "strato",
+          "type": "ad-server",
+          "username": "student"
+        },
+        {
+          "agent_enabled": false,
+          "agent_type": "",
+          "agents": [
+            "coder56"
+          ],
+          "data_content": "",
+          "data_prompt": "",
+          "generate_data": false,
+          "guardrail_enabled": false,
+          "id": "h1_2",
+          "image": "ubuntu:24.04",
+          "name": "attacker",
+          "password": "strato",
+          "type": "normal-user",
+          "username": "student"
+        }
+      ],
+      "id": "net1",
+      "internet": true,
+      "name": "ad-lan",
+      "router_id": "router1",
+      "router_ids": [
+        "router1"
+      ]
+    }
+  ],
+  "router": {
+    "firewall": {
+      "allowed": []
+    },
+    "password": "strato",
+    "ssh_enabled": false,
+    "username": "admin"
+  },
+  "routers": [
+    {
+      "id": "router1",
+      "name": "core",
+      "parent_router_id": "",
+      "password": "strato",
+      "ssh_enabled": false,
+      "username": "admin"
+    }
+  ],
+  "updated_at": "2026-07-28T19:50:21Z"
+}

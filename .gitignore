@@ -154,3 +154,19 @@ dmypy.json
 /images/scl-repo-host/.env
 /images/scl-repo-host/backend.env
 /images/scl-repo-host/*.env
+
+# Pentest-target topology data and env secrets stay out of the repo
+# (lab-specific: erpnext, greedy, openhospital targets ship as images,
+# not as committed topology state)
+/data/greedy.env
+/data/topologies/erpnext-*/
+/data/topologies/greedy-*/
+/data/topologies/openhospital-*/
+/data/topologies/defender-eval-*/
+/data/topologies/weblab/
+/data/topologies/rdp-integration-smoke-*/
+/data/topologies/office-lab-*/
+
+# Local backups / pre-edit snapshots of baked plugin sources
+*.bak-*
+*.before-*
