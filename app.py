@@ -122,6 +122,14 @@ WEB_HOST_IMAGE = 'scl-web-host:0.1'
 # package install needs host-side internet access, which an isolated,
 # non-internet topology subnet doesn't have at container-runtime).
 SMB_HOST_IMAGE = 'scl-smb-server:0.1'
+# Dedicated image for `db-server` hosts — a real PostgreSQL server (:5432) + sshd
+# (:22, bash shell) baked in at build time. Carries TWO control paths: a weak,
+# guessable SSH credential (the obvious path), and a weak PostgreSQL *superuser*
+# password reachable over the network, which yields RCE via the superuser-only
+# `COPY ... FROM PROGRAM` primitive (the non-obvious path — see the
+# `postgres-copy-rce` attacker skill). Holds a seeded `corp` database with
+# sensitive customer records. Provisioned at first boot (idempotent, marker-gated).
+DB_HOST_IMAGE = 'scl-db-host:0.1'
 
 # Dedicated image for `coder56-mcp` hosts — a CHILD of the opencode image (FROM
 # scl-plugin-network-topology-ubuntu-opencode:0.1) that inherits coder56 + the
@@ -231,6 +239,11 @@ HOST_TYPES = {
         'label': 'SMB server (vulnerable)',
         'ports': ['445/tcp', '139/tcp'],
         'description': 'Samba file share deliberately misconfigured (anonymous guest access, world-writable share) so it is exploitable without any authentication, holding seeded private data.',
+    },
+    'db-server': {
+        'label': 'Database server (PostgreSQL + SSH)',
+        'ports': ['5432/tcp', '22/tcp'],
+        'description': 'Real PostgreSQL server (:5432) + sshd (:22, bash shell) holding a seeded customer database. Two control paths: a weak/guessable SSH credential, and a weak PostgreSQL superuser password reachable over the network that yields RCE via the superuser-only COPY ... FROM PROGRAM primitive (see the postgres-copy-rce attacker skill). Provisioned at first boot.',
     },
     'exfil-listener': {
         'label': 'Exfil listener',

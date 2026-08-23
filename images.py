@@ -603,3 +603,40 @@ def ensure_erpnext_image(topology, force_rebuild=False):
     if build.returncode != 0:
         raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.ERPNEXT_HOST_IMAGE}')
     print(f"✅ Built ERPNext-host image: {app.ERPNEXT_HOST_IMAGE}")
+
+
+def ensure_db_image(topology, force_rebuild=False):
+    """Build the db-host (PostgreSQL + SSH) image if any host is a `db-server`.
+
+    Mirrors ensure_web_image's build-from-context pattern. The image bakes a real
+    PostgreSQL server (network password auth, a weak superuser password enabling
+    the COPY..FROM PROGRAM RCE) + a seeded `corp` database + sshd, plus a first-boot
+    supervisor (no runtime egress). PostgreSQL is installed and the DB is seeded at
+    BUILD time because a `db-server` host typically lives on a non-internet topology
+    subnet with no runtime egress to reach apt. See images/scl-db-host/.
+    """
+    has_db_host = any(
+        host.get('type') == 'db-server'
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    )
+    if not has_db_host:
+        return
+
+    if not force_rebuild:
+        result = subprocess.run(['docker', 'image', 'inspect', app.DB_HOST_IMAGE], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ Db-host image exists: {app.DB_HOST_IMAGE}")
+            return
+
+    context = Path(os.environ.get('IMAGES_DIR', '/app/images')) / 'scl-db-host'
+    if not context.exists():
+        raise RuntimeError(f'Db-host image build context not found: {context}')
+    print(f"🔨 Building Db-host image: {app.DB_HOST_IMAGE} from {context}")
+    build = subprocess.run(
+        ['docker', 'build', '-t', app.DB_HOST_IMAGE, str(context)],
+        capture_output=True, text=True, check=False,
+    )
+    if build.returncode != 0:
+        raise RuntimeError(build.stderr or build.stdout or f'Failed to build {app.DB_HOST_IMAGE}')
+    print(f"✅ Built Db-host image: {app.DB_HOST_IMAGE}")

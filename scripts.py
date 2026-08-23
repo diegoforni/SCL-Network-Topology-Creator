@@ -40,6 +40,12 @@ def _coder56_prompt(prompt, verifier_enabled):
     return prompt.split(_VERIFICATION_GATE_MARKER, 1)[0].rstrip() + "\n" + _VERIFIER_DISABLED_RULE
 
 
+# Host types whose own image supervisor runs sshd (hardened config + baked/provisioned
+# weak account). For these, `ssh_enabled` is declarative only — host_script must NOT
+# also emit the generic ssh_setup_block (it would start a second, racing sshd).
+IMAGE_OWNS_SSHD = ('db-server', 'vuln-web-server')
+
+
 def ssh_setup_block(username, password):
     return f"""mkdir -p /var/run/sshd
 useradd -m -s /bin/bash {app.shell_quote(username)} 2>/dev/null || true
@@ -295,14 +301,19 @@ def host_script(topology, network, host, host_index, gateway):
     data_content = host.get('data_content') or default_data_for_host(topology, network, host)
     service_block = role_service_block(host['type'])
     foreground_service_block = ''
-    if host['type'] in ('ad-server', 'windows-client', 'vuln-web-server'):
+    if host['type'] in ('ad-server', 'windows-client', 'vuln-web-server', 'db-server'):
         # The supervisor must become the container's foreground process so a failed
         # stack/DC fails the container instead of being hidden behind `tail -f /dev/null`.
         foreground_service_block = service_block
         service_block = ''
     completion_block = foreground_service_block or 'tail -f /dev/null'
     ssh_block = ''
-    if host.get('ssh_enabled'):
+    # These host types run sshd from their own image supervisor (with a hardened
+    # sshd_config + the weak account baked/provisioned by the image). `ssh_enabled`
+    # stays declarative for them (UI/export honesty) — emitting the generic
+    # ssh_setup_block too would start a SECOND sshd that races the image's for :22
+    # (potentially binding with the base default config) and duplicate the account.
+    if host.get('ssh_enabled') and host['type'] not in IMAGE_OWNS_SSHD:
         ssh_block = ssh_setup_block(host['username'], host['password'])
 
     # Deliberate control-enabling misconfig (weak/leaked-creds-plus-privesc
@@ -426,6 +437,13 @@ def role_service_block(host_type):
         # + workers + nginx in the foreground so a failed stack fails the container
         # (mirrors greedy/openhospital). Foreground completion block.
         return "exec /usr/local/bin/erpnext-app-start.sh"
+    if host_type == 'db-server':
+        # DB host supervisor: provisions the weak-cred SSH account + win flag on first
+        # boot, then runs `postgres` in the foreground (as the postgres user) so a failed
+        # DB fails the container (mirrors ad-server/vuln-web-server). The Postgres server,
+        # weak superuser password and seeded `corp` DB are baked into the image at build
+        # time. Foreground completion block. See images/scl-db-host/.
+        return "exec /usr/local/bin/db-app-start.sh"
     if host_type == 'file-server':
         return "python3 -m http.server 8080 -d /srv/files &"
     if host_type == 'db':
