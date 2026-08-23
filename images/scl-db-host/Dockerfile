@@ -39,7 +39,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #    cluster data dir / config so the running container needs no apt or egress. ──
 COPY db-seed.sql /tmp/db-seed.sql
 RUN set -eu; \
-    PGVER="$(ls /etc/postgresql)"; \
+    PGVER="$(ls /etc/postgresql | sort -V | tail -1)"; \
     PGCONF="/etc/postgresql/$PGVER/main"; \
     echo "listen_addresses = '*'"            >> "$PGCONF/postgresql.conf"; \
     echo "password_encryption = scram-sha-256" >> "$PGCONF/postgresql.conf"; \

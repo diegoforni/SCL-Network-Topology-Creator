@@ -54,5 +54,9 @@ fi
 # `-c config_file=` points at the Debian-managed config, which sets data_directory,
 # hba_file, etc. Running the binary directly (not pg_ctlcluster) keeps it in the
 # foreground as PID 1 so a crash fails the container.
+# Ensure the socket/PID dir exists (unix_socket_directories + external_pid_file point
+# here). pg_ctlcluster would recreate it; running the binary directly does not, so a
+# fresh tmpfs-backed /run would otherwise leave postgres unable to open its socket.
+mkdir -p /var/run/postgresql && chown postgres:postgres /var/run/postgresql && chmod 2775 /var/run/postgresql
 log "starting PostgreSQL in the foreground (PID 1)..."
 exec su postgres -c "exec ${PGBIN} -c config_file=${PGCONF}"
