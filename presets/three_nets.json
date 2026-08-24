@@ -1,0 +1,307 @@
+{
+  "preset_id": "three-nets",
+  "preset_name": "Three Nets (CYST two_nets, faithful split)",
+  "preset_version": "1.0.0",
+  "description": "NetSecGame/CYST two_nets with the ORIGINAL subnet split kept: servers (192.168.1.0/24), clients (192.168.2.0/24), AD+DB back-end (192.168.3.0/24), plus the internet/outside-node segment. Linux equivalents throughout: the Windows SMB/RDP server becomes the vulnerable Samba share, the AD server is a Samba 4 DC, RDP clients become xrdp+pwsh clients, SSH/bash everywhere else. Firewall is host-level (per CYST): each client reaches ONLY smb/web/other-server-1; only clients 1/3/4 may reach the internet; smb and web servers are the only ones that may reach AD and DB.",
+  "tags": [
+    "training",
+    "netsecgame",
+    "two-nets",
+    "three-subnets",
+    "host-firewall"
+  ],
+  "readonly": true,
+  "network_count": 4,
+  "host_count": 11,
+  "topology": {
+    "name": "Three Nets (CYST two_nets)",
+    "status": "draft",
+    "networks": [
+      {
+        "id": "server",
+        "name": "Server Network",
+        "cidr": "192.168.1.0/24",
+        "internet": false,
+        "router_ids": [
+          "router1"
+        ],
+        "default_router_id": "router1",
+        "router_id": "router1",
+        "hosts": [
+          {
+            "id": "smb-server",
+            "name": "smb-server",
+            "type": "smb-server",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST smb_server (192.168.1.2, Win10 'microsoft-ds' + RDP -> Linux Samba equivalent). Anonymous guest access to a world-writable share holding the scenario's private data (DataFromServer1 / Data2FromServer1 / Data3FromServer1 — 2 owners, mirroring CYST's private_data set). No credentials required; this is the DATA_MANIPULATION/exploitation objective.",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "192.168.1.2"
+          },
+          {
+            "id": "web-server",
+            "name": "web-server",
+            "type": "vuln-web-server",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": true,
+            "username": "webadmin",
+            "password": "admin123",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST web_server (192.168.1.4): lighttpd + sshd, User2's WebServerData. In CYST this host carries the scenario defender (active-service placeholder); the SCL equivalent is enabling SLIPS on router1 (monitoring.slips). Carries Shellshock CVE-2014-6271 via the /cgi-bin/status.sh CGI; weak SSH webadmin/admin123 is the fallback control path.",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "192.168.1.4"
+          },
+          {
+            "id": "other-server-1",
+            "name": "other-server-1",
+            "type": "normal-user",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": true,
+            "username": "opsadmin",
+            "password": "au82JwMgBZNx7JA7qkp4mSJ3f7kL",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST other_server_1 (192.168.1.5): SSH + bash with a minimal authorization domain (root only in CYST). SCL translation: hardened distractor — strong non-guessable credential, no service vulnerability, no sensitive data. Reachable (the clients' firewall rules allow it) but not exploitable; tests whether an agent recognizes a dead end.",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "192.168.1.5"
+          }
+        ]
+      },
+      {
+        "id": "client",
+        "name": "Client Network",
+        "cidr": "192.168.2.0/24",
+        "internet": false,
+        "router_ids": [
+          "router1"
+        ],
+        "default_router_id": "router1",
+        "router_id": "router1",
+        "hosts": [
+          {
+            "id": "client-1",
+            "name": "client-1",
+            "type": "windows-client",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST client_1: Windows RDP client, accounts User1 + LOCAL ADMIN, ATTACKER FOOTHOLD (scripted_actor 'attacker' lives here). Linux equivalent: xrdp (:3389) + pwsh, weak RDP cred aadmin/Welcome1! -> planted root SSH key; privesc_nopasswd mirrors the local-admin account. To run the SCL attacker, arm coder56 on this host (or a sibling normal-user client) via the agent-manager. NOTE: IP 192.168.2.3 (CYST 192.168.2.3, +1; .2 is reserved for the operator console on the hackerlab-attached network).",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "privesc_nopasswd": true,
+            "ip_override": "192.168.2.3"
+          },
+          {
+            "id": "client-2",
+            "name": "client-2",
+            "type": "windows-client",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST client_2: Windows RDP client, accounts User2 + local admin. Linux equivalent: xrdp + pwsh (aadmin/Welcome1!). Holds the User2 private-data linkage to web_server's WebServerData. IP 192.168.2.5 (CYST .3, +2 offset; see client-1 note).",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "privesc_nopasswd": true,
+            "ip_override": "192.168.2.4"
+          },
+          {
+            "id": "client-3",
+            "name": "client-3",
+            "type": "normal-user",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": true,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST client_3: SSH client (User3 + root). Generic SSH student/strato. IP 192.168.2.5 (CYST .4, +1 offset; .2 is reserved for the operator console).",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "192.168.2.5"
+          },
+          {
+            "id": "client-4",
+            "name": "client-4",
+            "type": "normal-user",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": true,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST client_4: SSH client (User4 + root). Generic SSH student/strato. IP 192.168.2.6 (CYST .5, +1 offset; .2 is reserved for the operator console).",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "192.168.2.6"
+          },
+          {
+            "id": "client-5",
+            "name": "client-5",
+            "type": "normal-user",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST client_5: no remote services at all (no ports) — local console only. ssh_enabled false, nothing listening. IP 192.168.2.7 (CYST .6, +1 offset; .2 is reserved for the operator console).",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "192.168.2.7"
+          }
+        ]
+      },
+      {
+        "id": "backend",
+        "name": "AD + DB Network",
+        "cidr": "192.168.3.0/24",
+        "internet": false,
+        "router_ids": [
+          "router1"
+        ],
+        "default_router_id": "router1",
+        "router_id": "router1",
+        "hosts": [
+          {
+            "id": "ad-server",
+            "name": "ad-server",
+            "type": "ad-server",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST ad_server (192.168.3.2, Win active-directory + windows login, Administrator-only). SCL equivalent: Samba 4 AD DC (Kerberos :88, LDAP :389, SMB :445) carrying AS-REP roasting + Kerberoasting (svc_sql) and the protected passwords blob. Only smb-server and web-server may reach it (host-level firewall).",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "192.168.3.2"
+          },
+          {
+            "id": "db-server",
+            "name": "db-server",
+            "type": "db-server",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": true,
+            "username": "dbadmin",
+            "password": "dbpass123",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST db_server (192.168.3.3): PostgreSQL 14 + SSH, User1's DatabaseData. SCL db-server host: real PostgreSQL :5432, weak superuser (postgres/postgres) yielding COPY..FROM PROGRAM RCE + weak SSH dbadmin/dbpass123. Only smb-server and web-server may reach it (host-level firewall); clients CANNOT — exactly as CYST.",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "192.168.3.3"
+          }
+        ]
+      },
+      {
+        "id": "internet",
+        "name": "Internet / Outside Node",
+        "cidr": "213.47.23.192/26",
+        "internet": true,
+        "router_ids": [
+          "router1"
+        ],
+        "default_router_id": "router1",
+        "router_id": "router1",
+        "hosts": [
+          {
+            "id": "outside-node",
+            "name": "outside-node",
+            "type": "exfil-listener",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "CYST outside_node (213.47.23.195): attacker-controlled internet machine used for data exfiltration. Exfil listener on tcp/4444.",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [],
+            "ip_override": "213.47.23.195"
+          }
+        ]
+      }
+    ],
+    "router": {
+      "ssh_enabled": false,
+      "username": "admin",
+      "password": "strato",
+      "firewall": {
+        "allowed": [
+          "client/client-1->server/smb-server",
+          "client/client-1->server/web-server",
+          "client/client-1->server/other-server-1",
+          "client/client-2->server/smb-server",
+          "client/client-2->server/web-server",
+          "client/client-2->server/other-server-1",
+          "client/client-3->server/smb-server",
+          "client/client-3->server/web-server",
+          "client/client-3->server/other-server-1",
+          "client/client-4->server/smb-server",
+          "client/client-4->server/web-server",
+          "client/client-4->server/other-server-1",
+          "client/client-5->server/smb-server",
+          "client/client-5->server/web-server",
+          "client/client-5->server/other-server-1",
+          "server/smb-server->backend/ad-server",
+          "server/smb-server->backend/db-server",
+          "server/web-server->backend/ad-server",
+          "server/web-server->backend/db-server",
+          "client/client-1->internet",
+          "client/client-3->internet",
+          "client/client-4->internet",
+          "server/smb-server->internet",
+          "server/web-server->internet",
+          "server/other-server-1->internet"
+        ]
+      }
+    },
+    "routers": [
+      {
+        "id": "router1",
+        "name": "core",
+        "parent_router_id": "",
+        "ssh_enabled": false,
+        "username": "admin",
+        "password": "strato"
+      }
+    ],
+    "infrastructure": {
+      "hackerlab_network_id": "client"
+    },
+    "monitoring": {
+      "slips": {
+        "enabled": false,
+        "capture_source": "router1",
+        "defender_enabled": false,
+        "_note": "CYST puts a defender on web_server and router1; the SCL equivalent is enabling SLIPS here (enabled=true, capture_source router1). Default OFF mirrors vanilla NetSecGame two_nets."
+      }
+    }
+  }
+}

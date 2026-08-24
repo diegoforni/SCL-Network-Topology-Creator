@@ -1270,6 +1270,31 @@
           }
         }
 
+        // Host-level firewall rules ('net/host->net[/host]'): rendered as an
+        // annotation under the network-to-network edge they narrow, so the graph
+        // stays readable instead of drawing per-host edge spaghetti. A network
+        // pair with ONLY host rules shows blocked at the subnet level (correct:
+        // the router drops everything not explicitly allowed) with the host
+        // exceptions listed on the edge label.
+        const hostRules = (model.router.firewall.allowed || []).filter((pair) => pair.includes('/'));
+        if (hostRules.length) {
+          const ruleText = hostRules.map((pair) => {
+            const [src, dst] = pair.split('->');
+            const fmt = (side) => {
+              const [netId, hostId] = side.split('/');
+              const net = networks.find((n) => n.id === netId);
+              const host = net?.hosts.find((h) => h.id === hostId);
+              return host ? `${net.name}/${host.name}` : side;
+            };
+            return `${fmt(src)} → ${fmt(dst)}`;
+          }).join('\\n');
+          parts.push(`
+            <g>
+              <text x="20" y="70" fill="#1167b1" font-size="12" style="white-space: pre-line;">Host-level rules:\n${escapeHtml(ruleText)}</text>
+            </g>
+          `);
+        }
+
         const routerParts = routers.map((router) => {
           const pos = routerPositions[router.id];
           if (!pos) return '';
@@ -1670,8 +1695,20 @@
             if (model.infrastructure?.hackerlab_network_id && !model.networks.find((network) => network.id === model.infrastructure.hackerlab_network_id)) {
               model.infrastructure.hackerlab_network_id = model.networks[0]?.id || '';
             }
+            // Keep 'net->net' pairs only between surviving networks; keep
+            // host-level 'net/host->net[/host]' pairs as long as BOTH networks
+            // survive (the host itself is resolved at render time, and a missing
+            // host id is skipped server-side, so re-adding a host with the same
+            // id resurrects its rules).
             const validPairs = new Set(model.networks.flatMap((from) => model.networks.filter((to) => to.id !== from.id).map((to) => `${from.id}->${to.id}`)));
-            model.router.firewall.allowed = (model.router.firewall.allowed || []).filter((pair) => validPairs.has(pair));
+            const survivingIds = new Set(model.networks.map((n) => n.id));
+            model.router.firewall.allowed = (model.router.firewall.allowed || []).filter((pair) => {
+              if (pair.includes('/')) {
+                const [src, dst] = pair.split('->');
+                return survivingIds.has(src.split('/')[0]) && survivingIds.has((dst || '').split('/')[0]);
+              }
+              return validPairs.has(pair);
+            });
             render();
           }
           if (action === 'delete-router') {

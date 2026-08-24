@@ -109,6 +109,11 @@ def validate_topology(topology):
 
     firewall = topology.setdefault('router', {}).setdefault('firewall', {})
     allowed = firewall.get('allowed') or []
+    # Entries are 'src->dst' where each side is a network id, optionally narrowed
+    # to a single host as 'net/host' (host-level firewall rules). Unknown ids are
+    # kept here (string-shaped) and skipped at nft-render time — dropping them
+    # here would silently delete rules the editor will re-resolve once the host
+    # is re-added.
     firewall['allowed'] = [
         pair for pair in allowed
         if isinstance(pair, str) and '->' in pair

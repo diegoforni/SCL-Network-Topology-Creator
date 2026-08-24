@@ -465,26 +465,93 @@ def role_service_block(host_type):
     return ":"
 
 
+def _firewall_rule_scopes(topology):
+    """Resolve firewall.allowed entries into (source_scope, dest_scope) address scopes.
+
+    Three entry shapes (all '->'-separated strings):
+      * 'net->net'        — whole-subnet rule (the original model)
+      * 'net/host->net'   — source narrowed to ONE host of the source network
+      * 'net->net/host'   — destination narrowed to ONE host of the dest network
+      * 'net/host->net/host' — both ends pinned to single hosts
+    Host ids resolve to the SAME ip host_script/compose assign (ip_override aware),
+    so a rule tracks the host even if its static IP is later changed in the editor.
+    Unresolvable entries (unknown network/host id) are skipped: the firewall-graph
+    UI already prunes stale pairs on network delete, and validate_topology drops
+    malformed strings — silently ignoring the remainder keeps a saved topology
+    loadable after hosts are renamed away.
+    """
+    hosts_by_id = {
+        host['id']: (network, host)
+        for network in topology.get('networks', [])
+        for host in network.get('hosts', [])
+    }
+    networks_by_id = {network['id']: network for network in topology.get('networks', [])}
+    allowed = (topology.get('router', {}) or {}).get('firewall', {}).get('allowed') or []
+    scopes = []
+    for entry in allowed:
+        if not isinstance(entry, str) or '->' not in entry:
+            continue
+        source_part, dest_part = entry.split('->', 1)
+
+        def _resolve(part):
+            # 'net' or 'net/host' -> (cidr, host_or_None); None when unresolvable.
+            if '/' in part:
+                net_id, host_id = part.split('/', 1)
+                network = networks_by_id.get(net_id)
+                host = (hosts_by_id.get(host_id) or (None, None))[1]
+                if network is None or host is None:
+                    return None
+                return network, host
+            network = networks_by_id.get(part)
+            return None if network is None else (network, None)
+
+        source = _resolve(source_part)
+        dest = _resolve(dest_part)
+        if source is None or dest is None:
+            continue
+        scopes.append((source, dest))
+    return scopes
+
+
+def _scope_address(network, host, host_index_hint):
+    # host_ip honors ip_override; the hint keeps deterministic .10+ fallbacks when
+    # the caller cannot know the host's position in its network's host list.
+    return app.host_ip(network['cidr'], host_index_hint, host)
+
+
+def _host_index_in_network(network, host):
+    for index, candidate in enumerate(network.get('hosts', []), start=1):
+        if candidate is host or candidate.get('id') == host.get('id'):
+            return index
+    return 1
+
+
 def router_script(topology, router, descendant_networks, child_routes, transit_subnets, is_root, default_source_ip=''):
-    allowed_pairs = set(topology.get('router', {}).get('firewall', {}).get('allowed', []))
     forward_rules = []
     if is_root:
         # Permit egress out the WAN (egress) interface for any subnet that needs the
         # outside world: an internet-enabled network, OR a network carrying an agent
         # (which must reach its LLM). This blanket allow is the single place egress
         # is governed — tighten it to a destination allowlist (e.g. only the LLM
-        # API + package mirrors) here for controlled egress.
+        # API + package mirrors) here for controlled egress. Host-pinned firewall
+        # pairs never touch this: the scenario's "internet" is a real topology
+        # bridge (holding e.g. the exfil listener), reached via inter-network
+        # rules below, not via the WAN.
         for network in descendant_networks:
             if network.get('internet') or any(app.host_agents(h) for h in network.get('hosts', [])):
                 forward_rules.append(f"ip saddr {network['cidr']} oifname \"$$wan_if\" accept")
         for subnet in transit_subnets:
             forward_rules.append(f"ip saddr {subnet} oifname \"$$wan_if\" accept")
-    for source in topology.get('networks', []):
-        for dest in topology.get('networks', []):
-            if source['id'] == dest['id']:
-                continue
-            if f"{source['id']}->{dest['id']}" in allowed_pairs:
-                forward_rules.append(f"ip saddr {source['cidr']} ip daddr {dest['cidr']} accept")
+    for source, dest in _firewall_rule_scopes(topology):
+        source_network, source_host = source
+        dest_network, dest_host = dest
+        if source_network['id'] == dest_network['id']:
+            continue  # same-bridge traffic never crosses the router
+        source_index = _host_index_in_network(source_network, source_host) if source_host else 1
+        dest_index = _host_index_in_network(dest_network, dest_host) if dest_host else 1
+        source_addr = _scope_address(source_network, source_host, source_index) if source_host else source_network['cidr']
+        dest_addr = _scope_address(dest_network, dest_host, dest_index) if dest_host else dest_network['cidr']
+        forward_rules.append(f"ip saddr {source_addr} ip daddr {dest_addr} accept")
     if not forward_rules:
         forward_rules.append('counter drop')
     route_lines = []
