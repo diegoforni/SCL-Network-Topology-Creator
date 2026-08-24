@@ -103,6 +103,93 @@ def test_router_script_minimal_golden(minimal_topology, golden):
 
 
 # ---------------------------------------------------------------------------
+# router_script host-level firewall rules — 'net/host->net[/host]' entries must
+# render as per-IP nftables rules (ip_override aware), replacing the subnet-wide
+# rule for that pair. Covers the three_nets preset's CYST-faithful matrix.
+# ---------------------------------------------------------------------------
+def _root_script(topology):
+    by_id, children, nets_by_router = app.build_router_maps(topology)
+    router_id = topology['routers'][0]['id']
+    return app.router_script(
+        topology, by_id[router_id],
+        app.router_descendant_networks(router_id, children, nets_by_router),
+        [], [], is_root=True)
+
+
+def test_router_script_host_level_rules(make_topology):
+    t = make_topology(
+        {
+            "name": "Host FW",
+            "networks": [
+                {"id": "srv", "cidr": "10.77.1.0/24", "hosts": [
+                    {"id": "a", "type": "normal-user", "ip_override": "10.77.1.42"},
+                    {"id": "b", "type": "normal-user"},
+                ]},
+                {"id": "cli", "cidr": "10.77.2.0/24", "hosts": [
+                    {"id": "c", "type": "normal-user"},
+                ]},
+            ],
+            "router": {"firewall": {"allowed": [
+                "cli/c->srv/a",     # host -> host
+                "cli->srv/b",       # net -> host
+                "cli/c->srv",       # host -> net
+            ]}},
+        },
+        topo_id="host-fw",
+    )
+    out = _root_script(t)
+    # host->host: both ends pinned to the resolved IPs (a honors ip_override).
+    assert "ip saddr 10.77.2.11 ip daddr 10.77.1.42 accept" in out
+    # net->host: source stays subnet-wide, dest pinned (b is index 2 -> .12).
+    assert "ip saddr 10.77.2.0/24 ip daddr 10.77.1.12 accept" in out
+    # host->net: source pinned, dest subnet-wide.
+    assert "ip saddr 10.77.2.11 ip daddr 10.77.1.0/24 accept" in out
+    # NO subnet-wide cli->srv rule may exist (only per-host exceptions).
+    assert "ip saddr 10.77.2.0/24 ip daddr 10.77.1.0/24 accept" not in out
+
+
+def test_router_script_unresolvable_host_entries_skipped(make_topology):
+    # Entries referencing unknown hosts/networks are skipped at render time, not
+    # dropped at validate time, so a rule survives a host's temporary absence.
+    t = make_topology(
+        {
+            "name": "Ghost FW",
+            "networks": [
+                {"id": "n1", "hosts": [{"id": "h1", "type": "normal-user"}]},
+                {"id": "n2", "hosts": [{"id": "h2", "type": "normal-user"}]},
+            ],
+            "router": {"firewall": {"allowed": [
+                "n1/ghost->n2",          # unknown source host -> skipped
+                "n1/h1->n2/ghost",       # unknown dest host -> skipped
+                "nowhere->n2",           # unknown network -> skipped
+                "n1/h1->n2/h2",          # valid -> rendered
+            ]}},
+        },
+        topo_id="ghost-fw",
+    )
+    out = _root_script(t)
+    assert "ip saddr 10.77.1.11 ip daddr 10.77.2.11 accept" in out  # the one valid rule
+    # Only that rule (plus default drop) — nothing for the ghost entries.
+    import re
+    accept_rules = re.findall(r"^\s+ip saddr .+ accept$", out, re.M)
+    assert len(accept_rules) == 1
+
+
+def test_validate_topology_keeps_host_level_pair_strings(make_topology):
+    t = make_topology(
+        {
+            "name": "KeepPairs",
+            "networks": [{"id": "n1", "hosts": [{"id": "h1"}]}],
+            "router": {"firewall": {"allowed": ["n1/h1->n2/h2", "invalid", "a->b", 5]}},
+        },
+        topo_id="keeppairs",
+    )
+    # 'net/host' strings survive validation (resolved at nft-render time); the
+    # malformed entries are still dropped. Unknown ids are NOT an error.
+    assert t["router"]["firewall"]["allowed"] == ["n1/h1->n2/h2", "a->b"]
+
+
+# ---------------------------------------------------------------------------
 # hackerlab_script — deterministic one-liner from network + gateway.
 # ---------------------------------------------------------------------------
 def test_hackerlab_script_golden(minimal_topology, golden):
