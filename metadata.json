@@ -3,7 +3,7 @@
   "name": "Network Topology Builder",
   "description": "Create and manage routed network topologies with segmented networks, routers, and host roles",
   "version": "2.0.0",
-  "ui_url": "http://localhost:9002",
+  "ui_url": "http://scl-network-topology:9002",
   "author": "StratoCyberLab",
   "api_endpoints": ["/api/topologies", "/api/jobs", "/api/networks", "/api/routers"],
   "capabilities": ["topology_crud", "container_lifecycle", "docker_compose_generation"],
