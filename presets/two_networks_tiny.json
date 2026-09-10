@@ -3,10 +3,14 @@
   "preset_name": "Two Networks Tiny",
   "preset_version": "1.0.0",
   "description": "Minimal cyber range: one client, one file server, one external C&C host, replicating NetSecGame's two_networks_tiny scenario shape.",
-  "tags": ["training", "minimal", "netsecgame"],
+  "tags": [
+    "training",
+    "minimal",
+    "netsecgame"
+  ],
   "readonly": true,
   "network_count": 3,
-  "host_count": 3,
+  "host_count": 4,
   "topology": {
     "name": "Two Networks Tiny",
     "status": "draft",
@@ -16,7 +20,9 @@
         "name": "Client Network",
         "cidr": "10.10.10.0/24",
         "internet": false,
-        "router_ids": ["router1"],
+        "router_ids": [
+          "router1"
+        ],
         "default_router_id": "router1",
         "router_id": "router1",
         "hosts": [
@@ -35,6 +41,27 @@
             "agent_type": "",
             "agents": [],
             "privesc_nopasswd": true
+          },
+          {
+            "id": "attacker",
+            "name": "attacker",
+            "type": "normal-user",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [
+              "coder56"
+            ],
+            "privesc_nopasswd": false,
+            "llm_url": "https://llm.ai.e-infra.cz/v1",
+            "llm_provider": "einfra",
+            "llm_model": "glm-5.2"
           }
         ]
       },
@@ -43,7 +70,9 @@
         "name": "Server Network",
         "cidr": "10.10.20.0/24",
         "internet": false,
-        "router_ids": ["router1"],
+        "router_ids": [
+          "router1"
+        ],
         "default_router_id": "router1",
         "router_id": "router1",
         "hosts": [
@@ -69,7 +98,9 @@
         "name": "C&C Network",
         "cidr": "213.47.23.0/24",
         "internet": false,
-        "router_ids": ["router1"],
+        "router_ids": [
+          "router1"
+        ],
         "default_router_id": "router1",
         "router_id": "router1",
         "hosts": [
@@ -97,7 +128,10 @@
       "username": "admin",
       "password": "strato",
       "firewall": {
-        "allowed": ["client->server", "client->cnc"]
+        "allowed": [
+          "client->server",
+          "client->cnc"
+        ]
       }
     },
     "routers": [
@@ -118,6 +152,10 @@
         "enabled": false,
         "capture_source": "router1",
         "defender_enabled": true
+      },
+      "nsg_observer": {
+        "enabled": true,
+        "state_level": "operational"
       }
     }
   }

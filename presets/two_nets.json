@@ -11,7 +11,7 @@
   ],
   "readonly": true,
   "network_count": 3,
-  "host_count": 11,
+  "host_count": 12,
   "topology": {
     "name": "Two Nets",
     "status": "draft",
@@ -200,6 +200,27 @@
             "agent_type": "",
             "agents": [],
             "ip_override": "192.168.2.7"
+          },
+          {
+            "id": "attacker",
+            "name": "attacker",
+            "type": "normal-user",
+            "image": "ubuntu:24.04",
+            "ssh_enabled": false,
+            "username": "student",
+            "password": "strato",
+            "generate_data": false,
+            "data_prompt": "",
+            "data_content": "",
+            "agent_enabled": false,
+            "agent_type": "",
+            "agents": [
+              "coder56"
+            ],
+            "privesc_nopasswd": false,
+            "llm_url": "https://llm.ai.e-infra.cz/v1",
+            "llm_provider": "einfra",
+            "llm_model": "glm-5.2"
           }
         ]
       },
@@ -263,6 +284,10 @@
         "capture_source": "router1",
         "defender_enabled": false,
         "_note": "Set slips.enabled=true to run the SLIPS IDS defender ('Agent vs SLIPS' mode). Vanilla NetSecGame two_nets ships the defender OFF (web_server active_services=[] placeholder), so default OFF = faithful."
+      },
+      "nsg_observer": {
+        "enabled": true,
+        "state_level": "operational"
       }
     }
   }

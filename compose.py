@@ -25,6 +25,113 @@ def resolve_run_id(topology_id):
     return base
 
 
+def _observer_config(topology):
+    """NSG-docker-state-creator settings from topology.monitoring.nsg_observer.
+
+    Returns the config dict when enabled, else None. Shape:
+      {"enabled": true, "state_level": "operational", ...}
+    """
+    cfg = (topology.get('monitoring') or {}).get('nsg_observer') or {}
+    return cfg if cfg.get('enabled') else None
+
+
+# Base images that CANNOT carry the NSG observer, with the reason. The observer
+# scripts require Python >= 3.7; old bases (e.g. Ubuntu bionic = python 3.6)
+# can still be observed by building their -observed variant with the
+# OBS_PYTHON_URL build-arg (side-by-side python-build-standalone interpreter;
+# shebangs rewritten, system python + workload untouched) — that is how
+# scl-ad-host-observed is built, so this list is currently EMPTY. Only list an
+# image here as a last resort (workload that would break regardless); hosts on
+# listed images keep their original image when nsg_observer is on and are
+# labelled scl.role=observer-skipped; their traffic is still covered by the
+# observed router.
+OBSERVER_UNSUPPORTED_IMAGES = {}
+
+
+def _observer_supported(image):
+    return image not in OBSERVER_UNSUPPORTED_IMAGES
+
+
+def _observed_image(image):
+    """Map repo:tag to its NSG-observed derivative repo-observed:tag.
+
+    The observed variant is built from NSG-docker-state-creator with
+    --build-arg BASE_IMAGE=<image> (observe-entrypoint becomes ENTRYPOINT,
+    collectors run beside the workload in the same container). The operator
+    builds the variants up front; compose fails fast if one is missing.
+    """
+    if ':' in image:
+        repo, tag = image.rsplit(':', 1)
+        return f'{repo}-observed:{tag}'
+    return f'{image}-observed'
+
+
+def _apply_observer(service_config, topology, run_id, service_name, observer_cfg,
+                    is_router=False, has_agents=False):
+    """Turn a host/router service into an NSG-observed service in place.
+
+    - swaps the image for its -observed derivative (observe-entrypoint PID 1);
+    - binds /observation under the shared run outputs dir, next to guardrail/
+      and slips/, so all evidence for a run lands in outputs/<run_id>/;
+    - seccomp=unconfined (strace needs ptrace; the default seccomp profile
+      blocks it);
+    - collector tuning: Zeek off (this arm64 host has no Zeek repo builds;
+      router pcap + socket inventory cover traffic), BCC off (victim hosts
+      must stay unprivileged to keep range fidelity: an eBPF-capable victim
+      is a container-escape primitive the threat model does not include),
+      victim pcap rings off (everything crosses the router anyway).
+
+    Agent hosts (opencode-family images) ship /usr/local/bin/entrypoint.sh as
+    their original ENTRYPOINT and it is what brings up the guardrail +
+    executor opencode serves after the host initializer. observe-entrypoint
+    REPLACES the image entrypoint, so the original one is prepended to the
+    service command: the observer then traces the full
+    entrypoint -> opencode -> bash-tool tree.
+    """
+    service_config['image'] = _observed_image(service_config['image'])
+    evidence_dir = f'{app.OUTPUTS_HOST_PATH}/{run_id}/observer/{service_name}'
+    service_config['volumes'] = service_config.get('volumes', []) + [
+        f'{evidence_dir}:/observation',
+    ]
+    service_config['security_opt'] = ['seccomp=unconfined']
+    env = {
+        'OBS_ENABLE_ZEEK': '0',
+        'OBS_ENABLE_BCC': '0',
+        'OBS_STATE_LEVEL': observer_cfg.get('state_level') or 'operational',
+        'OBS_ARCHIVE_CHANGED_FILES': '0',
+        # Cap hashed file size so reconciliation never chokes on large blobs.
+        'OBS_HASH_MAX_BYTES': '104857600',
+    }
+    if is_router:
+        # The router is the egress chokepoint: keep the fullest traffic record.
+        env.update({
+            'OBS_PCAP_FILE_MB': '50',
+            'OBS_PCAP_FILE_COUNT': '5',
+        })
+    else:
+        env.update({
+            # Victim/agent namespaces see little unique traffic (everything
+            # crosses the router); skip their pcap rings to save disk.
+            'OBS_ENABLE_PCAP': '0',
+        })
+    if has_agents:
+        env['OBS_EXCLUDE_PATHS'] = '/outputs'
+        # strace -ff makes every fork+exec ~100x slower on this arm64 host
+        # (measured: a bare `which` took 3s under tracing). The agent stack
+        # is subprocess-heavy (HexStrike /health alone spawns ~50 tool
+        # probes; every MCP tool call shells out), so syscall tracing there
+        # makes the agent unusable. The process monitor still records every
+        # command with full cmdline + lifecycle, and the files/sockets/
+        # trajectory monitors keep the effect stream — only per-syscall
+        # detail is lost on the attacker host.
+        env['OBS_ENABLE_STRACE'] = '0'
+        # Wrap the original image entrypoint (see docstring).
+        service_config['command'] = ['/usr/local/bin/entrypoint.sh'] + list(
+            service_config.get('command') or [])
+    service_config.setdefault('environment', {}).update(env)
+    service_config.setdefault('labels', []).append('scl.role=observed')
+
+
 def generate_compose(topology, opencode_images=None):
     """Generate docker-compose configuration for the topology.
 
@@ -39,6 +146,7 @@ def generate_compose(topology, opencode_images=None):
     # overwrite. Stamped on every container's RUN_ID env + the .current_run
     # marker so every consumer resolves the same id.
     run_id = resolve_run_id(topology['id'])
+    observer_cfg = _observer_config(topology)
     try:
         (Path(app.OUTPUTS_HOST_PATH) / ".current_run").write_text(run_id)
     except OSError:
@@ -197,6 +305,13 @@ def generate_compose(topology, opencode_images=None):
         ):
             compose['services'][service_name]['cap_add'] = ['NET_ADMIN', 'NET_RAW']
             compose['services'][service_name]['volumes'] = [f'{pcaps_volume}:/pcaps']
+
+        # NSG observer: the router is the traffic chokepoint (all cross-subnet
+        # + egress flows cross it), so when observation is enabled it always
+        # gets the observed image + its own evidence dir.
+        if observer_cfg and _observer_supported(compose['services'][service_name]['image']):
+            _apply_observer(compose['services'][service_name], topology, run_id,
+                            service_name, observer_cfg, is_router=True)
 
     for index, network in enumerate(topology['networks'], start=1):
         network_key = f'topo_{network["id"]}'
@@ -437,6 +552,18 @@ def generate_compose(topology, opencode_images=None):
                 # internal docker network would let sibling containers reach the
                 # guardrail, so we omit it from `expose` entirely.
 
+
+            # NSG observer applies AFTER the agent conditional so it can wrap
+            # the (agent-adjusted) command with the original image entrypoint
+            # and merge OBS_* env into the agent environment. Images in
+            # OBSERVER_UNSUPPORTED_IMAGES stay unobserved (labelled).
+            if observer_cfg and _observer_supported(service_config['image']):
+                _apply_observer(service_config, topology, run_id, service_name,
+                                observer_cfg, has_agents=host_has_agents)
+            elif observer_cfg:
+                print(f"⚠️  NSG observer skipped for {service_name} "
+                      f"({service_config['image']}): {OBSERVER_UNSUPPORTED_IMAGES[service_config['image']]}")
+                service_config.setdefault('labels', []).append('scl.role=observer-skipped')
             compose['services'][service_name] = service_config
 
     # SLIPS sensor sidecar: reads the shared pcaps volume and forwards alerts to
