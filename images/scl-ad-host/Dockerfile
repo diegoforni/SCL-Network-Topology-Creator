@@ -20,14 +20,27 @@ LABEL description="SCL AD host — Samba AD DC (red-team engagement target)"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 18.04 is EOL -> redirect apt to the archive mirror.
-RUN sed -i -e 's|http://archive.ubuntu.com|http://old-releases.ubuntu.com|g' \
-           -e 's|http://security.ubuntu.com|http://old-releases.ubuntu.com|g' \
+# 18.04 is EOL and has been dropped from old-releases.ubuntu.com entirely, so
+# redirect apt to the frozen snapshot archive instead (timestamp = bionic's
+# final state). Path-inclusive patterns: sources.list lines carry /ubuntu and
+# the snapshot layout nests the timestamp under it
+# (snapshot.ubuntu.com/ubuntu/<TS>/dists/...).
+RUN sed -i -e 's|http://archive.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/20230601T000000Z|g' \
+           -e 's|http://security.ubuntu.com/ubuntu|https://snapshot.ubuntu.com/ubuntu/20230601T000000Z|g' \
            /etc/apt/sources.list
 
 # Build deps for Samba (era-matched: gcc-7, python2.7). AD-DC is enabled by default.
 # openssh-server provides the sshd used by the foreground supervisor.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# The snapshot mirror is https-only but the base image ships no CA bundle:
+# bootstrap with TLS verification relaxed JUST long enough to install
+# ca-certificates, then re-verify normally (apt still checks the frozen
+# Release signatures against the bionic keyring).
+RUN printf 'Acquire::https::Verify-Peer "false";\nAcquire::https::Verify-Host "false";\n' \
+        > /etc/apt/apt.conf.d/99-tls-bootstrap \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -f /etc/apt/apt.conf.d/99-tls-bootstrap \
+    && apt-get update && apt-get install -y --no-install-recommends \
         build-essential gcc make pkg-config \
         python2.7 python2.7-dev python \
         perl flex bison \
