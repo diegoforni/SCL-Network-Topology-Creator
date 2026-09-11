@@ -48,24 +48,64 @@ esac
 PY_TAG=20260901; PY_VER=cpython-3.11.16
 PYURL=${OBS_PYTHON_URL:-"https://github.com/astral-sh/python-build-standalone/releases/download/${PY_TAG}/${PY_VER}%2B${PY_TAG}-${PY_ARCH}-install_only.tar.gz"}
 
-echo "== refresh NSG source: $SRC =="
-if [ -d "$SRC/.git" ]; then
-    if git -C "$SRC" fetch origin; then
-        git -C "$SRC" reset --hard FETCH_HEAD
-    else
-        echo "fetch failed, recloning"
-        rm -rf "$SRC"
-        git clone "$UPSTREAM" "$SRC"
+STAMP="${NSG_STAMP:-$SRC/.observed-built-stamp}"
+
+# Refresh the source clone. Prefers plain git (fetch + reset); when this
+# container has no route to the upstream (filtered egress, e.g. the topology
+# plugin on a firewalled bridge), clones via a HOST-NETWORK helper container
+# and streams the tree back with docker cp — needs no host-path knowledge.
+# NSG_FORCE_HELPER=1 forces the helper path (for testing).
+# Empty $SRC in place — it may be a volume MOUNTPOINT (the plugin mounts the
+# nsg-src named volume at /var/lib/nsg-src), which cannot be removed itself.
+clear_src() {
+    find "$SRC" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+}
+fetch_src() {
+    if [ "${NSG_FORCE_HELPER:-0}" != "1" ]; then
+        if [ -d "$SRC/.git" ] && git -C "$SRC" fetch origin; then
+            git -C "$SRC" reset --hard FETCH_HEAD
+            return 0
+        fi
+        if timeout 15 git ls-remote "$UPSTREAM" HEAD >/dev/null 2>&1; then
+            clear_src
+            git clone "$UPSTREAM" "$SRC"
+            return $?
+        fi
     fi
-else
-    git clone "$UPSTREAM" "$SRC"
+    echo "no direct route to $UPSTREAM - cloning via host-network helper container"
+    tmp=$SRC.tmp
+    rm -rf "$tmp"; mkdir -p "$tmp"
+    cid=$(docker run -d --network host --entrypoint sh alpine/git \
+              -c "git clone --depth 1 '$UPSTREAM' /src") || return 1
+    while [ "$(docker inspect -f '{{.State.Running}}' "$cid" 2>/dev/null)" = "true" ]; do
+        sleep 2
+    done
+    if [ "$(docker inspect -f '{{.State.ExitCode}}' "$cid" 2>/dev/null)" = "0" ]; then
+        docker cp "$cid:/src/." "$tmp/" \
+            && clear_src && cp -a "$tmp"/. "$SRC"/ && rm -rf "$tmp" \
+            || { rm -rf "$tmp"; docker rm -f "$cid" >/dev/null 2>&1; return 1; }
+    else
+        echo "helper clone failed:"
+        docker logs --tail 5 "$cid" 2>&1 || true
+        rm -rf "$tmp"
+        docker rm -f "$cid" >/dev/null 2>&1
+        return 1
+    fi
+    docker rm -f "$cid" >/dev/null 2>&1
+}
+
+echo "== refresh NSG source: $SRC =="
+# Preserve the change-detection stamp across the helper swap below.
+OLDSTAMP="$(cat "$STAMP" 2>/dev/null || true)"
+fetch_src
+if [ -n "$OLDSTAMP" ] && [ ! -f "$STAMP" ]; then
+    echo "$OLDSTAMP" > "$STAMP" || true
 fi
 echo "upstream HEAD: $(git -C "$SRC" rev-parse --short HEAD)"
 
 # Change detection for AUTO mode: hash of the observer/ + examples/ trees the
 # Dockerfile actually COPYs. Any commit elsewhere in the repo is a no-op.
 OBSTREE="$(git -C "$SRC" rev-parse HEAD:observer)-$(git -C "$SRC" rev-parse HEAD:examples 2>/dev/null || echo none)"
-STAMP="${NSG_STAMP:-$SRC/.observed-built-stamp}"
 if [ "${FORCE:-0}" != "1" ] && [ "${AUTO:-0}" = "1" ]; then
     if [ "$(cat "$STAMP" 2>/dev/null || true)" != "$OBSTREE" ]; then
         echo "AUTO: observer tree changed since last build (stamp -> $OBSTREE); rebuilding all variants"
