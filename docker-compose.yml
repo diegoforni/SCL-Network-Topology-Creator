@@ -20,6 +20,10 @@ services:
       # plugins/network-topology/images — the same files the container reads at /app/images.
       - ${IMAGES_DIR:-./images}:/app/images:ro
       - ./.env:/app/.env:ro
+      # Persistent home for the NSG observer source clone + change-detection
+      # stamp, so `docker compose up` can refresh/rebuild observed images from
+      # latest upstream without re-cloning from scratch every start.
+      - nsg-src:/var/lib/nsg-src
     environment:
       - PLUGIN_ID=network-topology
       - PLUGIN_VERSION=2.0.0
@@ -40,6 +44,9 @@ services:
     networks:
       - scl-playground-net
     restart: unless-stopped
+
+volumes:
+  nsg-src:
 
 networks:
   scl-playground-net:

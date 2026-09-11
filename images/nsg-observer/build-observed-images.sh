@@ -12,6 +12,13 @@
 # FORCE=1  rebuild all observed variants even if present. Stop + start a
 #          running topology afterwards to pick the new images up (the next
 #          start writes evidence to a new timestamped run dir).
+# AUTO=1   rebuild all variants when the upstream observer/ tree CONTENT
+#          changed since the last successful build (tree-hash stamp kept
+#          next to the clone), otherwise only build missing images. This is
+#          the mode the topology plugin runs at every container start
+#          (images/nsg-observer/plugin-entrypoint.sh), so a plain
+#          `docker compose up` always ends with observed images built from
+#          the latest upstream observer code.
 #
 # Kilimanjaro (everything runs as the agent user, uid 1013):
 #   docker run --rm --network=host \
@@ -55,6 +62,19 @@ else
 fi
 echo "upstream HEAD: $(git -C "$SRC" rev-parse --short HEAD)"
 
+# Change detection for AUTO mode: hash of the observer/ + examples/ trees the
+# Dockerfile actually COPYs. Any commit elsewhere in the repo is a no-op.
+OBSTREE="$(git -C "$SRC" rev-parse HEAD:observer)-$(git -C "$SRC" rev-parse HEAD:examples 2>/dev/null || echo none)"
+STAMP="${NSG_STAMP:-$SRC/.observed-built-stamp}"
+if [ "${FORCE:-0}" != "1" ] && [ "${AUTO:-0}" = "1" ]; then
+    if [ "$(cat "$STAMP" 2>/dev/null || true)" != "$OBSTREE" ]; then
+        echo "AUTO: observer tree changed since last build (stamp -> $OBSTREE); rebuilding all variants"
+        FORCE=1
+    else
+        echo "AUTO: observer tree unchanged ($(cat "$STAMP")); building missing images only"
+    fi
+fi
+
 # Base images are builds of this repo's images/ dirs; build when missing.
 for name in scl-smb-server scl-db-host scl-web-host scl-ad-host scl-rdp-host; do
     img=$name:0.1
@@ -89,6 +109,8 @@ for img in scl-plugin-network-topology-ubuntu:0.1 scl-smb-server:0.1 \
 done
 # ad-server: bionic base, needs the side-by-side interpreter (arch-detected).
 build_observed scl-ad-host:0.1 --build-arg OBS_PYTHON_URL="$PYURL"
+
+echo "$OBSTREE" > "$STAMP" 2>/dev/null || echo "warning: cannot write stamp $STAMP"
 
 echo "== DONE =="
 docker images --format '{{.Repository}}:{{.Tag}}' | grep -- '-observed:0.1' | sort
