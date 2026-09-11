@@ -187,7 +187,7 @@ CMD ["/bin/bash"]
     if use_static:
         print(f"   Using static opencode image Dockerfile (guardrail-ready): {static_dir}")
         result = subprocess.run(
-            ['docker', 'build', '-t', opencode_image, str(static_dir)],
+            ['docker', 'build', '--network=host', '-t', opencode_image, str(static_dir)],
             capture_output=True,
             text=True,
             check=False,
@@ -195,7 +195,7 @@ CMD ["/bin/bash"]
     else:
         # Non-SCL foundation (kali, etc.) -> generated Dockerfile, contextless stdin build.
         result = subprocess.run(
-            ['docker', 'build', '-t', opencode_image, '-'],
+            ['docker', 'build', '--network=host', '-t', opencode_image, '-'],
             input=dockerfile,
             capture_output=True,
             text=True,
@@ -285,7 +285,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 """
 
         build = subprocess.run(
-            ['docker', 'build', '-t', image, '-'],
+            ['docker', 'build', '--network=host', '-t', image, '-'],
             input=dockerfile,
             capture_output=True,
             text=True,
@@ -312,7 +312,7 @@ def ensure_slips_image(topology):
         raise RuntimeError(f'SLIPS image build context not found: {context}')
     print(f"🔨 Building SLIPS sensor image: {app.SLIPS_IMAGE} from {context}")
     build = subprocess.run(
-        ['docker', 'build', '-t', app.SLIPS_IMAGE, str(context)],
+        ['docker', 'build', '--network=host', '-t', app.SLIPS_IMAGE, str(context)],
         capture_output=True, text=True, check=False,
     )
     if build.returncode != 0:
@@ -348,7 +348,7 @@ def ensure_smb_image(topology, force_rebuild=False):
         raise RuntimeError(f'SMB-server image build context not found: {context}')
     print(f"🔨 Building SMB-server image: {app.SMB_HOST_IMAGE} from {context}")
     build = subprocess.run(
-        ['docker', 'build', '-t', app.SMB_HOST_IMAGE, str(context)],
+        ['docker', 'build', '--network=host', '-t', app.SMB_HOST_IMAGE, str(context)],
         capture_output=True, text=True, check=False,
     )
     if build.returncode != 0:
@@ -383,7 +383,7 @@ def ensure_repo_image(topology, force_rebuild=False):
         raise RuntimeError(f'Repo-host image build context not found: {context}')
     print(f"🔨 Building repo-host image: {app.REPO_HOST_IMAGE} from {context} (repo: {app.REPO_HOST_URL})")
     build = subprocess.run(
-        ['docker', 'build', '--build-arg', f'REPO_HOST_URL={app.REPO_HOST_URL}', '-t', app.REPO_HOST_IMAGE, str(context)],
+        ['docker', 'build', '--network=host', '--build-arg', f'REPO_HOST_URL={app.REPO_HOST_URL}', '-t', app.REPO_HOST_IMAGE, str(context)],
         capture_output=True, text=True, check=False,
     )
     if build.returncode != 0:
@@ -418,7 +418,7 @@ def ensure_ad_image(topology, force_rebuild=False):
         raise RuntimeError(f'AD-host image build context not found: {context}')
     print(f"🔨 Building AD-host image: {app.AD_HOST_IMAGE} from {context}")
     build = subprocess.run(
-        ['docker', 'build', '-t', app.AD_HOST_IMAGE, str(context)],
+        ['docker', 'build', '--network=host', '-t', app.AD_HOST_IMAGE, str(context)],
         capture_output=True, text=True, check=False,
     )
     if build.returncode != 0:
@@ -453,7 +453,7 @@ def ensure_rdp_image(topology, force_rebuild=False):
         raise RuntimeError(f'RDP-host image build context not found: {context}')
     print(f"🔨 Building RDP-host image: {app.RDP_HOST_IMAGE} from {context}")
     build = subprocess.run(
-        ['docker', 'build', '-t', app.RDP_HOST_IMAGE, str(context)],
+        ['docker', 'build', '--network=host', '-t', app.RDP_HOST_IMAGE, str(context)],
         capture_output=True, text=True, check=False,
     )
     if build.returncode != 0:
@@ -489,7 +489,7 @@ def ensure_web_image(topology, force_rebuild=False):
         raise RuntimeError(f'Web-host image build context not found: {context}')
     print(f"🔨 Building Web-host image: {app.WEB_HOST_IMAGE} from {context}")
     build = subprocess.run(
-        ['docker', 'build', '-t', app.WEB_HOST_IMAGE, str(context)],
+        ['docker', 'build', '--network=host', '-t', app.WEB_HOST_IMAGE, str(context)],
         capture_output=True, text=True, check=False,
     )
     if build.returncode != 0:
@@ -530,7 +530,7 @@ def ensure_coder56_mcp_image(topology, force_rebuild=False):
         raise RuntimeError(f'Coder56-MCP-host image build context not found: {context}')
     print(f"🔨 Building Coder56-MCP-host image: {app.CODER56_MCP_HOST_IMAGE} from {context}")
     build = subprocess.run(
-        ['docker', 'build', '-t', app.CODER56_MCP_HOST_IMAGE, str(context)],
+        ['docker', 'build', '--network=host', '-t', app.CODER56_MCP_HOST_IMAGE, str(context)],
         capture_output=True, text=True, check=False,
     )
     if build.returncode != 0:
@@ -634,7 +634,7 @@ def ensure_db_image(topology, force_rebuild=False):
         raise RuntimeError(f'Db-host image build context not found: {context}')
     print(f"🔨 Building Db-host image: {app.DB_HOST_IMAGE} from {context}")
     build = subprocess.run(
-        ['docker', 'build', '-t', app.DB_HOST_IMAGE, str(context)],
+        ['docker', 'build', '--network=host', '-t', app.DB_HOST_IMAGE, str(context)],
         capture_output=True, text=True, check=False,
     )
     if build.returncode != 0:
